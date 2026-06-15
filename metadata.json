@@ -1,0 +1,6 @@
+{
+  "name": "RogueMind Arena",
+  "description": "A high-performance cyberpunk top-down arena shooter with dual joysticks, waves, boss fights and procedurally animated vector graphics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
