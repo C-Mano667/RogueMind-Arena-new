@@ -13,9 +13,17 @@ import kotlin.random.Random
 enum class PlayerAnimState { IDLE, RUN, DASH, SHOOT, HURT, DEATH }
 enum class EnemyAnimState { IDLE, RUN, ATTACK, HURT, DEATH }
 enum class EnemyType { SOLDIER, ELITE, BOSS }
-enum class GameState { START_SCREEN, IN_CINEMATIC, PLAYING, GAME_OVER, GAME_WON }
+enum class GameState { START_SCREEN, IN_CINEMATIC, PLAYING, UPGRADE_MENU, LEVEL_UP_MENU, GAME_OVER, GAME_WON, MAIN_MENU, INVENTORY, PERMA_UPGRADES, SETTINGS, STAGE_CLEAR, WEAPON_SELECT }
+enum class PowerUpType { DAMAGE, RAPID_FIRE, SPEED, SHIELD, HEALTH, MAGNET, BERSERK, GOLDEN, OVERDRIVE, FREEZE, CREDIT, WEAPON_CRATE, NUKE }
+enum class WeaponType { DEFAULT, SHOTGUN, SMG, ASSAULT_RIFLE, LASER_RIFLE, PLASMA_CANNON, ROCKET_LAUNCHER, RAILGUN }
+enum class UpgradeType { 
+    RAPID_FIRE, DAMAGE_CORE, ACCELERATOR, PROJECTILE_EX, PRECISION, CRIT_CORE,
+    REINFORCED_ARMOR, CYBER_LEGS, DASH_CAP, XP_SCANNER, NANO_REPAIR,
+    SHOCKWAVE, INCENDIARY, CHAIN_LIGHTNING, EXPLOSIVE, AUTO_SHIELD 
+}
 
-class GameEngine {
+
+class GameEngine(val context: android.content.Context? = null) {
 
     companion object {
         const val WORLD_SIZE = 2400f
@@ -41,12 +49,91 @@ class GameEngine {
     }
 
     // --- GAME CONTROL ---
-    var state = GameState.START_SCREEN
-    var waveNumber = 1
+    var state = GameState.MAIN_MENU
+    var currentStage = 1
+    var currentPhase = 0 // 0=Quota, 1=Boss Warning, 2=Boss Active
+    var stageTotalEnemies = 20
+    var stageEnemiesSpawned = 0
+    var stageEnemiesKilled = 0
+    var stageEnemyCap = 5
+    var bossWarningTimer = 0f
     var waveProgressDelay = 0f
+    var supportSoldiersTimer = 0f
+    var supportSoldiersSpawned = false
     var score = 0
     var enemiesKilled = 0
     var gameTime = 0f
+    
+    var level = 1
+    var xp = 0
+    var requiredXp = 100
+    
+    // Perma progression / Saves
+    var credits = 0
+    var highestStage = 1
+    var highestLevel = 1
+    var bestScore = 0
+    var totalEnemiesKilledAllTime = 0
+    var totalPlayTime = 0f
+    
+    // Perma Upgrades
+    var permaDamageLvl = 0
+    var permaFireRateLvl = 0
+    var permaHpLvl = 0
+    var permaSpeedLvl = 0
+    var permaDashLvl = 0
+    var permaCritChanceLvl = 0
+    var permaCritDamageLvl = 0
+
+    // Weapon Unlocks
+    var unlockedShotgun = false
+    var unlockedSmg = false
+    var unlockedAssaultRifle = false
+    var unlockedLaserRifle = false
+    var unlockedPlasmaCannon = false
+    var unlockedRailgun = false
+
+    var activeWeapon = WeaponType.DEFAULT
+    var weaponChoices = emptyList<WeaponType>()
+
+    var freezeTimer = 0f
+    var weaponCratesAvailable = mutableListOf<WeaponType>()
+    
+    // Upgrades
+    var upgDamageMod = 0f
+    var upgFireRateMod = 0f
+    var upgSpeedMod = 0f
+    var upgDashCooldown = 0f
+    var upgMaxHp = 0f
+    var upgCritChance = 0f
+    var upgCritDamage = 0f
+    var upgBulletSpeedMod = 1f
+    var upgExtraProjectiles = 0
+    var upgMagnetActive = false
+    var upgXpRadiusMod = 0f
+    var upgNanoRepair = false
+    var nanoRepairTimer = 0f
+    
+    var upgShockwave = false
+    var upgIncendiary = false
+    var upgChainLightning = false
+    var upgExplosive = false
+    var upgAutoShield = false
+    var playerShield = 0f
+    var autoShieldTimer = 0f
+    
+    // PowerUp Buffs
+    var buffDamageTimer = 0f
+    var buffRapidFireTimer = 0f
+    var buffSpeedTimer = 0f
+    var buffShieldTimer = 0f
+    var buffMagnetTimer = 0f
+    var buffMultiTimer = 0f
+    var buffBerserkTimer = 0f
+    var buffOverdriveTimer = 0f
+
+    var timeScale = 1.0f
+    var hitStopTimer = 0f
 
     // Cinematic track variables
     var cinematicTimer = 0f
@@ -78,6 +165,11 @@ class GameEngine {
         var radius = 28f
         var hp = 100f
         var maxHp = 100f
+        var speedMod = 1.0f
+        var damageMod = 1.0f
+        var fireRateMod = 1.0f
+        var critChance = 0.15f
+        var dashCooldownBase = 3.0f
         var speed = 320f
         var angle = 0f
         
@@ -110,7 +202,7 @@ class GameEngine {
     val player = Player()
 
     // Enemy Data
-    class Enemy(val id: Int, val type: EnemyType) {
+    class Enemy(var id: Int, var type: EnemyType) {
         var x = 0f
         var y = 0f
         var radius = if (type == EnemyType.SOLDIER) 24f else if (type == EnemyType.ELITE) 30f else 65f
@@ -118,6 +210,7 @@ class GameEngine {
         var maxHp = hp
         var speed = if (type == EnemyType.SOLDIER) 160f else if (type == EnemyType.ELITE) 210f else 115f
         var angle = 0f
+        var isActive = false
         
         var hurtTimer = 0f
         var shootCooldown = 0f
@@ -136,7 +229,31 @@ class GameEngine {
         var bossChargeTimer = 0f
         var bossChargeVx = 0f
         var bossChargeVy = 0f
-
+        var deathHandled = false
+        
+        fun reset(newId: Int, newType: EnemyType) {
+            id = newId
+            type = newType
+            radius = if (type == EnemyType.SOLDIER) 24f else if (type == EnemyType.ELITE) 30f else 65f
+            hp = if (type == EnemyType.SOLDIER) 30f else if (type == EnemyType.ELITE) 90f else 1200f
+            maxHp = hp
+            speed = if (type == EnemyType.SOLDIER) 160f else if (type == EnemyType.ELITE) 210f else 115f
+            hurtTimer = 0f
+            shootCooldown = 0f
+            state = EnemyAnimState.IDLE
+            stateTimer = 0f
+            deathTimer = 0f
+            path = emptyList()
+            currentPathWaypointIndex = 0
+            pathRecalcTimer = 0f
+            bossAttackTimer = 0f
+            bossAttackPattern = 0
+            bossChargeTimer = 0f
+            bossChargeVx = 0f
+            bossChargeVy = 0f
+            deathHandled = false
+            isActive = true
+        }
         fun takeDamage(damage: Float): Boolean {
             if (hp <= 0f) return false
             hp = (hp - damage).coerceAtLeast(0f)
@@ -152,6 +269,25 @@ class GameEngine {
             return true
         }
     }
+
+    private val enemyPool = Array(300) { Enemy(it, EnemyType.SOLDIER) }
+    private var enemyPoolIndex = 0
+
+    private fun getPooledEnemy(type: EnemyType): Enemy {
+        for (i in 0 until 300) {
+            val idx = (enemyPoolIndex + i) % 300
+            val enemy = enemyPool[idx]
+            if (!enemy.isActive) {
+                enemyPoolIndex = (idx + 1) % 300
+                enemy.reset(enemyIdCounter.incrementAndGet(), type)
+                return enemy
+            }
+        }
+        val fallback = enemyPool[0]
+        fallback.reset(enemyIdCounter.incrementAndGet(), type)
+        return fallback
+    }
+    
     val enemies = mutableListOf<Enemy>()
     private val enemyIdCounter = AtomicInteger(1)
 
@@ -216,6 +352,26 @@ class GameEngine {
     }
     private val particlePool = Array(200) { Particle() }
 
+    class XpOrb {
+        var x = 0f
+        var y = 0f
+        var amount = 0
+        var isActive = false
+        var isMagnetized = false
+    }
+    val xpOrbs = Array(150) { XpOrb() }
+
+    class PowerUp {
+        var x = 0f
+        var y = 0f
+        var type = PowerUpType.HEALTH
+        var life = 0f
+        var isActive = false
+        var hoverOffset = 0f
+    }
+    val powerUps = Array(10) { PowerUp() }
+    var powerUpSpawnTimer = 0f
+
     // Screen Shake Indicator
     var screenShakeAmount = 0f
 
@@ -232,17 +388,175 @@ class GameEngine {
             val obsY = centerY + OBSTACLE_RADIUS * sin(theta)
             obstacles.add(Obstacle(obsX, obsY, OBSTACLE_SIZE))
         }
+        
+        try {
+            loadPersistence()
+        } catch (e: Exception) {
+            android.util.Log.e("RogueMind", "Failed to load persistence: ${e.message}", e)
+        }
+    }
+
+    fun hurtPlayer(amount: Float): Boolean {
+        if (buffOverdriveTimer > 0f) return false
+        
+        var realDamage = amount
+        if (playerShield > 0f) {
+            if (realDamage <= playerShield) {
+                playerShield -= realDamage
+                return false
+            } else {
+                realDamage -= playerShield
+                playerShield = 0f
+            }
+        }
+        return player.takeDamage(realDamage)
     }
 
     // --- GAME ACTIONS ---
 
+fun spawnXpOrb(x: Float, y: Float, amount: Int) {
+        for (orb in xpOrbs) {
+            if (!orb.isActive) {
+                orb.x = x
+                orb.y = y
+                orb.amount = amount
+                orb.isActive = true
+                orb.isMagnetized = false
+                break
+            }
+        }
+    }
+
+    fun savePersistence() {
+        context?.let {
+            val prefs = it.getSharedPreferences("RogueMindPrefs", android.content.Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putInt("highestStage", highestStage)
+                putInt("highestLevel", highestLevel)
+                putInt("bestScore", bestScore)
+                putInt("totalEnemies", totalEnemiesKilledAllTime)
+                putFloat("totalPlayTime", totalPlayTime)
+                putInt("credits", credits)
+                putInt("permaDamage", permaDamageLvl)
+                putInt("permaFireRate", permaFireRateLvl)
+                putInt("permaHp", permaHpLvl)
+                putInt("permaSpeed", permaSpeedLvl)
+                putInt("permaDash", permaDashLvl)
+                putInt("permaCritChance", permaCritChanceLvl)
+                putInt("permaCritDamage", permaCritDamageLvl)
+                
+                putBoolean("unlockedShotgun", unlockedShotgun)
+                putBoolean("unlockedSmg", unlockedSmg)
+                putBoolean("unlockedAssaultRifle", unlockedAssaultRifle)
+                putBoolean("unlockedLaserRifle", unlockedLaserRifle)
+                putBoolean("unlockedPlasmaCannon", unlockedPlasmaCannon)
+                putBoolean("unlockedRailgun", unlockedRailgun)
+                
+                putString("activeWeapon", activeWeapon.name)
+                apply()
+            }
+        }
+    }
+
+    fun loadPersistence() {
+        context?.let {
+            val prefs = it.getSharedPreferences("RogueMindPrefs", android.content.Context.MODE_PRIVATE)
+            highestStage = prefs.getInt("highestStage", 1)
+            currentStage = highestStage
+            highestLevel = prefs.getInt("highestLevel", 1)
+            bestScore = prefs.getInt("bestScore", 0)
+            totalEnemiesKilledAllTime = prefs.getInt("totalEnemies", 0)
+            totalPlayTime = prefs.getFloat("totalPlayTime", 0f)
+            credits = prefs.getInt("credits", 0)
+            permaDamageLvl = prefs.getInt("permaDamage", 0)
+            permaFireRateLvl = prefs.getInt("permaFireRate", 0)
+            permaHpLvl = prefs.getInt("permaHp", 0)
+            permaSpeedLvl = prefs.getInt("permaSpeed", 0)
+            permaDashLvl = prefs.getInt("permaDash", 0)
+            permaCritChanceLvl = prefs.getInt("permaCritChance", 0)
+            permaCritDamageLvl = prefs.getInt("permaCritDamage", 0)
+
+            unlockedShotgun = prefs.getBoolean("unlockedShotgun", highestStage >= 2)
+            unlockedSmg = prefs.getBoolean("unlockedSmg", highestStage >= 5)
+            unlockedAssaultRifle = prefs.getBoolean("unlockedAssaultRifle", highestStage >= 10)
+            unlockedLaserRifle = prefs.getBoolean("unlockedLaserRifle", highestStage >= 15)
+            unlockedPlasmaCannon = prefs.getBoolean("unlockedPlasmaCannon", highestStage >= 25)
+            unlockedRailgun = prefs.getBoolean("unlockedRailgun", highestStage >= 40)
+            
+            try {
+                val wepName = prefs.getString("activeWeapon", "DEFAULT") ?: "DEFAULT"
+                activeWeapon = WeaponType.valueOf(wepName)
+            } catch (e: Exception) {
+                activeWeapon = WeaponType.DEFAULT
+            }
+        }
+    }
+
+    fun gainXp(amount: Int) {
+        if (state != GameState.PLAYING) return
+        xp += amount
+        if (xp >= requiredXp) {
+            // Level Up Trigger!
+            xp -= requiredXp
+            level++
+            requiredXp = (requiredXp * 1.5f).roundToInt()
+            
+            // Lightweight passive increase
+            upgMaxHp += 5f
+            player.maxHp += 5f
+            player.hp = (player.hp + 15f).coerceAtMost(player.maxHp)
+            upgDamageMod += 0.05f
+            upgFireRateMod += 0.02f
+            
+            spawnText(player.x, player.y - 60f, "LEVEL UP!", Color(0xFFFFCC00), true)
+            
+            if (level > highestLevel) highestLevel = level
+        }
+    }
     fun startNewGame() {
         state = GameState.PLAYING
-        waveNumber = 1
+        currentStage = 1
+        level = 1
+        xp = 0
+        requiredXp = 100
         enemiesKilled = 0
         score = 0
         gameTime = 0f
         waveProgressDelay = 0f
+        
+        upgDamageMod = permaDamageLvl * 0.10f
+        upgFireRateMod = permaFireRateLvl * 0.05f
+        upgSpeedMod = permaSpeedLvl * 0.05f
+        upgDashCooldown = permaDashLvl * 0.1f
+        upgMaxHp = permaHpLvl * 10f
+        upgCritChance = permaCritChanceLvl * 0.05f
+        upgCritDamage = permaCritDamageLvl * 0.10f
+        
+        upgBulletSpeedMod = 1f
+        upgExtraProjectiles = 0
+        upgMagnetActive = false
+        upgXpRadiusMod = 0f
+        upgNanoRepair = false
+        upgShockwave = false
+        upgIncendiary = false
+        upgChainLightning = false
+        upgExplosive = false
+        upgAutoShield = false
+        playerShield = 0f
+        
+        activeWeapon = WeaponType.DEFAULT
+        
+        buffDamageTimer = 0f
+        buffRapidFireTimer = 0f
+        buffSpeedTimer = 0f
+        buffShieldTimer = 0f
+        buffMagnetTimer = 0f
+        buffMultiTimer = 0f
+        buffBerserkTimer = 0f
+        buffOverdriveTimer = 0f
+        
+        for (orb in xpOrbs) orb.isActive = false
+        for (pu in powerUps) pu.isActive = false
 
         // Reset player
         player.x = ARENA_CENTER_X
@@ -263,45 +577,70 @@ class GameEngine {
         for (m in muzzleFlashes) m.isActive = false
         for (p in particlePool) p.isActive = false
 
-        spawnWave(waveNumber)
+        startStage(currentStage)
     }
 
-    private fun spawnWave(wave: Int) {
+    fun startStage(stage: Int) {
+        currentStage = stage
+        for (e in enemies) e.isActive = false
         enemies.clear()
-        val plX = player.x
-        val plY = player.y
+        
+        stageTotalEnemies = when (stage) {
+            1 -> 20
+            2 -> 25
+            5 -> 35
+            10 -> 50
+            25 -> 80
+            50 -> 120
+            else -> 20 + (stage * 2)
+        }
+        stageEnemyCap = when (stage) {
+            1 -> 5
+            2 -> 5
+            5 -> 6
+            10 -> 7
+            25 -> 10
+            50 -> 12
+            else -> 5 + (stage / 5)
+        }
+        
+        stageEnemiesSpawned = 0
+        stageEnemiesKilled = 0
+        currentPhase = 0 // Quota filling
+        bossWarningTimer = 0f
+        
+        spawnUpToCap()
+    }
 
-        when (wave) {
-            1 -> {
-                // Wave 1 = 10 Soldiers
-                spawnEnemiesCount(EnemyType.SOLDIER, 10, plX, plY)
-            }
-            2 -> {
-                // Wave 2 = 15 Soldiers + 3 Elites
-                spawnEnemiesCount(EnemyType.SOLDIER, 15, plX, plY)
-                spawnEnemiesCount(EnemyType.ELITE, 3, plX, plY)
-            }
-            3 -> {
-                // Wave 3 = 20 Soldiers + 5 Elites
-                spawnEnemiesCount(EnemyType.SOLDIER, 20, plX, plY)
-                spawnEnemiesCount(EnemyType.ELITE, 5, plX, plY)
-            }
-            4 -> {
-                // Wave 4 = Boss
-                triggerBossIntroCinematic()
-            }
+    fun spawnUpToCap() {
+        if (currentPhase != 0) return
+        
+        val activeEnemies = enemies.count { it.hp > 0f && it.type != EnemyType.BOSS }
+        val needed = stageEnemyCap - activeEnemies
+        val canSpawn = stageTotalEnemies - stageEnemiesSpawned
+        
+        val toSpawn = needed.coerceAtMost(canSpawn)
+        
+        if (toSpawn > 0) {
+            spawnEnemiesCount(toSpawn)
         }
     }
 
-    private fun spawnEnemiesCount(type: EnemyType, count: Int, plX: Float, plY: Float) {
+    private fun spawnEnemiesCount(count: Int) {
+        val plX = player.x
+        val plY = player.y
+        val hpScale = Math.pow(1.10, (currentStage - 1).toDouble()).toFloat()
+        
         var spawned = 0
-        while (spawned < count) {
+        var attempts = 0
+
+        while (spawned < count && attempts < 1000) {
+            attempts++
             val angle = Random.nextFloat() * 2.0f * PI.toFloat()
-            val dist = Random.nextFloat() * 700f + 550f // Keep range away from center but inside arena
+            val dist = Random.nextFloat() * 700f + 550f 
             val ex = (ARENA_CENTER_X + dist * cos(angle)).coerceIn(MIN_X + 60f, MAX_X - 60f)
             val ey = (ARENA_CENTER_Y + dist * sin(angle)).coerceIn(MIN_Y + 60f, MAX_Y - 60f)
 
-            // Check if coordinates overlap with obstacles
             var overlapsObstacle = false
             for (obs in obstacles) {
                 if (ex >= obs.left - 20f && ex <= obs.right + 20f && ey >= obs.top - 20f && ey <= obs.bottom + 20f) {
@@ -311,52 +650,96 @@ class GameEngine {
             }
 
             if (!overlapsObstacle && dist(ex, ey, plX, plY) > 400f) {
-                val enemy = Enemy(enemyIdCounter.incrementAndGet(), type)
+                val type = if (currentStage > 1 && Random.nextFloat() < 0.2f) EnemyType.ELITE else EnemyType.SOLDIER
+                val enemy = getPooledEnemy(type)
                 enemy.x = ex
                 enemy.y = ey
-                enemy.angle = angle + PI.toFloat() // Face the player's general direction
+                
+                if (type == EnemyType.SOLDIER) {
+                    enemy.maxHp = 100f * hpScale
+                    enemy.hp = enemy.maxHp
+                } else if (type == EnemyType.ELITE) {
+                    enemy.maxHp = 350f * hpScale
+                    enemy.hp = enemy.maxHp
+                }
+                
+                enemy.angle = angle + PI.toFloat()
                 enemies.add(enemy)
                 spawned++
+                stageEnemiesSpawned++
             }
         }
     }
 
-    private fun triggerBossIntroCinematic() {
+    private fun triggerBossIntroCinematic(stage: Int) {
+        android.util.Log.d("RogueMind", "BOSS_SPAWN_BEGIN")
         state = GameState.IN_CINEMATIC
-        cinematicTimer = 2.5f // 2.5 seconds cinema pause
+        cinematicTimer = 2.5f 
+        
+        cinematicBossName = when (stage) {
+            1 -> "CYBER TANK"
+            5 -> "TITAN MECH"
+            10 -> "PLASMA OVERSEER"
+            20 -> "WAR MACHINE"
+            30 -> "OMEGA CORE"
+            40 -> "VOID TITAN"
+            50 -> "ROGUEMIND PRIME"
+            else -> "MECHANICAL ABOMINATION"
+        }
+        cinematicBossTitle = "STAGE $stage GUARDIAN"
 
-        // Clear any leftover bullets or texts
         for (b in bulletPool) b.isActive = false
 
-        // Spawn Boss precisely at center
-        val boss = Enemy(enemyIdCounter.incrementAndGet(), EnemyType.BOSS)
+        val boss = getPooledEnemy(EnemyType.BOSS)
         boss.x = ARENA_CENTER_X
         boss.y = ARENA_CENTER_Y
+        boss.maxHp = 400f + (stage - 1) * 50f
+        boss.hp = boss.maxHp
+
         boss.angle = PI.toFloat() / 2f
         enemies.add(boss)
 
-        // Spawn 4 companion soldiers guarding corners
+        supportSoldiersTimer = 2.0f
+        supportSoldiersSpawned = false
+
+        android.util.Log.d("RogueMind", "BOSS_SPAWN_COMPLETE")
+    }
+
+    private fun spawnSupportSoldiers() {
         val guardingCoords = listOf(
             Pair(ARENA_CENTER_X - 250f, ARENA_CENTER_Y - 250f),
             Pair(ARENA_CENTER_X + 250f, ARENA_CENTER_Y - 250f),
             Pair(ARENA_CENTER_X - 250f, ARENA_CENTER_Y + 250f),
-            Pair(ARENA_CENTER_X + 250f, ARENA_CENTER_Y + 250f)
+            Pair(ARENA_CENTER_X + 250f, ARENA_CENTER_Y + 250f),
+            Pair(ARENA_CENTER_X, ARENA_CENTER_Y - 300f) // 5th soldier
         )
         for (coord in guardingCoords) {
-            val soldier = Enemy(enemyIdCounter.incrementAndGet(), EnemyType.SOLDIER)
+            val soldier = getPooledEnemy(EnemyType.SOLDIER)
             soldier.x = coord.first
             soldier.y = coord.second
             soldier.angle = atan2(ARENA_CENTER_Y - coord.second, ARENA_CENTER_X - coord.first)
             enemies.add(soldier)
         }
+        supportSoldiersSpawned = true
+        android.util.Log.d("RogueMind", "SUPPORT_SOLDIERS_SPAWNED")
     }
 
     // --- GAME ENGINE CYCLE UPDATE ---
 
-    fun update(dt: Float) {
-        if (state == GameState.START_SCREEN) return
+    fun update(dtRaw: Float) {
+        if (state != GameState.PLAYING && state != GameState.IN_CINEMATIC) return
 
+        if (hitStopTimer > 0f) {
+            hitStopTimer -= dtRaw
+            return // Skip updates to create hit-stop effect
+        }
+
+        val dt = dtRaw * timeScale
         gameTime += dt
+        
+        updateBuffs(dt)
+        updatePowerUpSpawns(dt)
+        updateXpOrbs(dt)
 
         // Decrement screen shake
         if (screenShakeAmount > 0f) {
@@ -370,22 +753,22 @@ class GameEngine {
         updateMuzzleFlashes(dt)
 
         if (state == GameState.IN_CINEMATIC) {
-            cinematicTimer -= dt
+            cinematicTimer -= dtRaw
             if (cinematicTimer <= 0f) {
                 state = GameState.PLAYING
                 // Add cinematic impact particles
-                createExplosionParticles(ARENA_CENTER_X, ARENA_CENTER_Y, Color.Red, 45)
+                createExplosionParticles(ARENA_CENTER_X, ARENA_CENTER_Y, Color.Red, 30)
                 screenShakeAmount = 25f
+                android.util.Log.d("RogueMind", "BOSS_AI_START")
             }
-            // Update animations/hurt states only
-            updateEnemySpasms(dt)
-            return
         }
 
         if (player.hp <= 0f) {
             // Player death sequence
             player.stateTimer += dt
-            if (player.stateTimer > 1.5f) {
+            if (player.stateTimer > 1.5f && state != GameState.GAME_OVER) {
+                totalPlayTime += gameTime
+                savePersistence()
                 state = GameState.GAME_OVER
             }
             updateEnemySpasms(dt) // Enemies keep moving/playing
@@ -398,11 +781,12 @@ class GameEngine {
         // 2. Active bullets movement & collisions
         updateBullets(dt)
 
-        // 3. Enemies AI decision scripts
+        // 3. Enemies AI decision scripts & Animations/Hurt Tracking
+        updateEnemySpasms(dt)
         updateEnemiesAI(dt)
 
         // 4. Wave progression watch
-        checkWaveProgression(dt)
+        checkStageProgression(dt)
     }
 
     private fun updatePlayerStatus(dt: Float) {
@@ -452,6 +836,150 @@ class GameEngine {
         }
     }
 
+    private fun updateBuffs(dt: Float) {
+        if (buffDamageTimer > 0f) buffDamageTimer -= dt
+        if (buffRapidFireTimer > 0f) buffRapidFireTimer -= dt
+        if (buffSpeedTimer > 0f) buffSpeedTimer -= dt
+        if (buffShieldTimer > 0f) buffShieldTimer -= dt
+        if (buffMagnetTimer > 0f) buffMagnetTimer -= dt
+        if (buffMultiTimer > 0f) buffMultiTimer -= dt
+        if (buffBerserkTimer > 0f) buffBerserkTimer -= dt
+        if (buffOverdriveTimer > 0f) {
+            buffOverdriveTimer -= dt
+        }
+        
+        // Recalculate player modifiers
+        player.damageMod = 1.0f + upgDamageMod + (if (buffDamageTimer > 0f) 0.5f else 0f) + (if (buffBerserkTimer > 0f) 0.25f else 0f)
+        player.fireRateMod = 1.0f + upgFireRateMod + (if (buffRapidFireTimer > 0f) 0.4f else 0f) + (if (buffBerserkTimer > 0f) 0.25f else 0f)
+        player.speedMod = 1.0f + upgSpeedMod + (if (buffSpeedTimer > 0f) 0.3f else 0f) + (if (buffBerserkTimer > 0f) 0.15f else 0f)
+        player.dashCooldownBase = 3.0f - upgDashCooldown
+        player.critChance = 0.15f + upgCritChance
+        
+        if (upgAutoShield && autoShieldTimer <= 0f && playerShield <= 0f) {
+            autoShieldTimer = 30f
+            playerShield = 50f
+        } else if (autoShieldTimer > 0f) {
+            autoShieldTimer -= dt
+        }
+
+        if (upgNanoRepair) {
+            nanoRepairTimer -= dt
+            if (nanoRepairTimer <= 0f) {
+                player.hp = (player.hp + 2f).coerceAtMost(player.maxHp)
+                nanoRepairTimer = 5f
+            }
+        }
+    }
+    
+    private fun spawnPowerUp(x: Float, y: Float, forcedType: PowerUpType? = null) {
+        val type = forcedType ?: when (Random.nextFloat()) {
+            in 0.000f..0.030f -> PowerUpType.NUKE
+            in 0.030f..0.060f -> PowerUpType.OVERDRIVE
+            in 0.060f..0.100f -> PowerUpType.GOLDEN
+            in 0.100f..0.150f -> PowerUpType.WEAPON_CRATE
+            in 0.150f..0.220f -> PowerUpType.FREEZE
+            in 0.220f..0.320f -> PowerUpType.CREDIT
+            in 0.320f..0.400f -> PowerUpType.MAGNET
+            in 0.400f..0.520f -> PowerUpType.BERSERK
+            in 0.520f..0.620f -> PowerUpType.DAMAGE
+            in 0.620f..0.720f -> PowerUpType.RAPID_FIRE
+            in 0.720f..0.820f -> PowerUpType.SPEED
+            in 0.820f..0.920f -> PowerUpType.SHIELD
+            else -> PowerUpType.HEALTH
+        }
+        for (pu in powerUps) {
+            if (!pu.isActive) {
+                pu.x = x
+                pu.y = y
+                pu.type = type
+                pu.life = 20f
+                pu.isActive = true
+                pu.hoverOffset = 0f
+                break
+            }
+        }
+    }
+
+    private fun updatePowerUpSpawns(dt: Float) {
+        for (pu in powerUps) {
+            if (!pu.isActive) continue
+            pu.life -= dt
+            pu.hoverOffset += dt * 2f
+            if (pu.life <= 0f) {
+                pu.isActive = false
+                continue
+            }
+            if (dist(pu.x, pu.y, player.x, player.y) < 50f) {
+                collectPowerUp(pu)
+            }
+        }
+    }
+
+    private fun collectPowerUp(pu: PowerUp) {
+        pu.isActive = false
+        triggerHaptic?.invoke()
+        createExplosionParticles(pu.x, pu.y, Color.Cyan, 15)
+        
+        val duration = 15f
+        when(pu.type) {
+            PowerUpType.DAMAGE -> { buffDamageTimer = duration; spawnText(player.x, player.y - 40f, "DAMAGE UP!", Color.Red, true) }
+            PowerUpType.RAPID_FIRE -> { buffRapidFireTimer = duration; spawnText(player.x, player.y - 40f, "RAPID FIRE!", Color.Yellow, true) }
+            PowerUpType.SPEED -> { buffSpeedTimer = duration; spawnText(player.x, player.y - 40f, "SPEED UP!", Color.Cyan, true) }
+            PowerUpType.SHIELD -> { buffShieldTimer = 20f; playerShield += 100f; spawnText(player.x, player.y - 40f, "+100 SHIELD", Color.Blue, true) }
+            PowerUpType.HEALTH -> { player.hp = (player.hp + 30f).coerceAtMost(player.maxHp); spawnText(player.x, player.y - 40f, "+30 HP", Color.Green, true) }
+            PowerUpType.MAGNET -> { buffMagnetTimer = 20f; spawnText(player.x, player.y - 40f, "MAGNET!", Color(0xFFFF00FF), true) }
+            PowerUpType.BERSERK -> { buffBerserkTimer = 10f; spawnText(player.x, player.y - 40f, "BERSERK!", Color.Red, true) }
+            PowerUpType.GOLDEN -> { gainXp(requiredXp - xp); spawnText(player.x, player.y - 40f, "LEVEL UP!", Color(0xFFFFD700), true) }
+            PowerUpType.OVERDRIVE -> { buffOverdriveTimer = 5f; spawnText(player.x, player.y - 40f, "OVERDRIVE!", Color(0xFF00FFFF), true) }
+            PowerUpType.FREEZE -> { freezeTimer = 5f; spawnText(player.x, player.y - 40f, "FREEZE!", Color(0xFFAAAAAA), true) }
+            PowerUpType.CREDIT -> { credits += 50; spawnText(player.x, player.y - 40f, "+50 CREDITS", Color.Yellow, true) }
+            PowerUpType.NUKE -> { 
+                for (e in enemies) if (e.hp > 0f) e.takeDamage(1000f)
+                spawnText(player.x, player.y - 40f, "NUKE!", Color.Red, true) 
+                createExplosionParticles(player.x, player.y, Color.Red, 40)
+            }
+            PowerUpType.WEAPON_CRATE -> {
+                // Populate weapons to choose from
+                val availableWeapons = mutableListOf<WeaponType>()
+                if (unlockedShotgun) availableWeapons.add(WeaponType.SHOTGUN)
+                if (unlockedSmg) availableWeapons.add(WeaponType.SMG)
+                if (unlockedAssaultRifle) availableWeapons.add(WeaponType.ASSAULT_RIFLE)
+                if (unlockedLaserRifle) availableWeapons.add(WeaponType.LASER_RIFLE)
+                if (unlockedPlasmaCannon) availableWeapons.add(WeaponType.PLASMA_CANNON)
+                if (unlockedRailgun) availableWeapons.add(WeaponType.RAILGUN)
+                
+                if (availableWeapons.isEmpty()) {
+                    spawnText(player.x, player.y - 40f, "NO WEAPONS UNLOCKED", Color.Gray, true)
+                } else {
+                    weaponCratesAvailable.clear()
+                    availableWeapons.shuffle()
+                    weaponCratesAvailable.addAll(availableWeapons.take(3))
+                    state = GameState.WEAPON_SELECT
+                }
+            }
+            else -> {}
+        }
+    }
+
+    private fun updateXpOrbs(dt: Float) {
+        val grabRadius = 120f * (1f + upgXpRadiusMod) * (if (buffMagnetTimer > 0f) 4f else 1f)
+        for (orb in xpOrbs) {
+            if (!orb.isActive) continue
+            var d = dist(orb.x, orb.y, player.x, player.y)
+            if (d < grabRadius || orb.isMagnetized) {
+                orb.isMagnetized = true
+                val angle = atan2(player.y - orb.y, player.x - orb.x)
+                orb.x += cos(angle) * 800f * dt
+                orb.y += sin(angle) * 800f * dt
+                d = dist(orb.x, orb.y, player.x, player.y)
+                if (d < 50f) {
+                    orb.isActive = false
+                    gainXp(orb.amount)
+                }
+            }
+        }
+    }
+
     private fun spawnAfterimage(x: Float, y: Float, angle: Float) {
         for (ai in afterimages) {
             if (!ai.isActive) {
@@ -477,15 +1005,55 @@ class GameEngine {
             }
         }
         // Purging dead enemies completely when animation ends
-        enemies.removeAll { it.hp <= 0f && it.deathTimer <= 0f }
+        val iterator = enemies.iterator()
+        while (iterator.hasNext()) {
+            val enemy = iterator.next()
+            if (enemy.hp <= 0f && enemy.deathTimer <= 0f) {
+                enemy.isActive = false
+                iterator.remove()
+            }
+        }
     }
 
     private fun updateEnemiesAI(dt: Float) {
+        if (state == GameState.IN_CINEMATIC) return
+        
+        if (freezeTimer > 0f) {
+            freezeTimer -= dt
+            return
+        }
         val px = player.x
         val py = player.y
 
         for (enemy in enemies) {
             if (enemy.hp <= 0f) {
+                if (!enemy.deathHandled) {
+                    enemy.deathHandled = true
+                    
+                    enemiesKilled++
+                    stageEnemiesKilled++
+                    totalEnemiesKilledAllTime++
+                    score += if (enemy.type == EnemyType.SOLDIER) 100 else if (enemy.type == EnemyType.ELITE) 300 else 5000
+                    createExplosionParticles(enemy.x, enemy.y, Color.Magenta, 22)
+                    
+                    val xpGained = if (enemy.type == EnemyType.SOLDIER) 10 else if (enemy.type == EnemyType.ELITE) 40 else 500
+                    spawnXpOrb(enemy.x, enemy.y, xpGained)
+
+                    val dropChance = if (enemy.type == EnemyType.SOLDIER) 0.5f else 1.0f
+                    if (enemy.type == EnemyType.BOSS || Random.nextFloat() < dropChance) {
+                        if (powerUps.count { it.isActive } < 10) {
+                            if (enemy.type == EnemyType.BOSS) {
+                                spawnPowerUp(enemy.x - 30f, enemy.y - 30f) // Just spawn something, we'll randomize types
+                                spawnPowerUp(enemy.x + 30f, enemy.y - 30f)
+                                spawnPowerUp(enemy.x, enemy.y + 30f)
+                                spawnXpOrb(enemy.x, enemy.y + 40f, 1000)
+                            } else {
+                                spawnPowerUp(enemy.x, enemy.y)
+                            }
+                        }
+                    }
+                }
+                
                 enemy.deathTimer -= dt
                 enemy.stateTimer += dt
                 continue
@@ -590,10 +1158,17 @@ class GameEngine {
                         enemy.pathRecalcTimer = 0.150f // Every 150ms
                     }
 
+                    val hpRatio = enemy.hp / enemy.maxHp
+                    val isPhase1 = hpRatio > 0.6f
+                    val isPhase2 = hpRatio > 0.3f && hpRatio <= 0.6f
+                    val isRage = hpRatio <= 0.3f
+                    
+                    val attackInterval = if (isRage) 2.5f else if (isPhase2) 3.5f else 4.2f
+
                     // Boss special attacks tick
                     enemy.bossAttackTimer += dt
-                    if (enemy.bossAttackTimer > 4.2f) {
-                        triggerBossSpecialAttack(enemy, px, py)
+                    if (enemy.bossAttackTimer > attackInterval) {
+                        triggerBossSpecialAttack(enemy, px, py, isPhase1, isPhase2, isRage)
                         enemy.bossAttackTimer = 0f
                     }
 
@@ -613,7 +1188,7 @@ class GameEngine {
 
                         // Collide player during charge
                         if (dist(enemy.x, enemy.y, px, py) < enemy.radius + player.radius) {
-                            if (player.takeDamage(22f)) {
+                            if (hurtPlayer(22f)) {
                                 createExplosionParticles(px, py, Color.Red, 12)
                                 triggerHaptic?.invoke()
                                 screenShakeAmount = 14f
@@ -735,13 +1310,13 @@ class GameEngine {
     // --- PLAYER MOVEMENT PHYSIC ENGINE CAPS ---
 
     fun movePlayer(vx: Float, vy: Float, dt: Float) {
-        if (player.hp <= 0f || player.isDashing || state != GameState.PLAYING) return
+        if (player.hp <= 0f || player.isDashing || (state != GameState.PLAYING && state != GameState.IN_CINEMATIC)) return
 
         val prevX = player.x
         val prevY = player.y
 
-        player.x += vx * player.speed * dt
-        player.y += vy * player.speed * dt
+        player.x += vx * player.speed * player.speedMod * dt
+        player.y += vy * player.speed * player.speedMod * dt
 
         if (vx != 0f || vy != 0f) {
             player.angle = atan2(vy, vx)
@@ -782,7 +1357,7 @@ class GameEngine {
     // --- DASH INITIATION ---
 
     fun performDash(dx: Float, dy: Float) {
-        if (player.hp <= 0f || player.dashCooldown > 0f || player.isDashing || state != GameState.PLAYING) return
+        if (player.hp <= 0f || player.dashCooldown > 0f || player.isDashing || (state != GameState.PLAYING && state != GameState.IN_CINEMATIC)) return
 
         // Calculate direction of dash
         var vx = dx
@@ -799,7 +1374,7 @@ class GameEngine {
         }
 
         player.isDashing = true
-        player.dashCooldown = DASH_COOLDOWN
+        player.dashCooldown = player.dashCooldownBase
         player.dashActiveTime = DASH_DISTANCE / DASH_SPEED
         player.dashVx = vx * DASH_SPEED
         player.dashVy = vy * DASH_SPEED
@@ -807,6 +1382,18 @@ class GameEngine {
         
         player.state = PlayerAnimState.DASH
         player.stateTimer = 0f
+
+        if (upgShockwave) {
+            for (enemy in enemies) {
+                if (dist(player.x, player.y, enemy.x, enemy.y) < 180f) {
+                    enemy.takeDamage(15f)
+                    val pkAngle = atan2(enemy.y - player.y, enemy.x - player.x)
+                    enemy.x += cos(pkAngle) * 60f
+                    enemy.y += sin(pkAngle) * 60f
+                }
+            }
+            createExplosionParticles(player.x, player.y, Color.Yellow, 20)
+        }
 
         // Emit swift dash particles
         createDashSmokeParticles(player.x, player.y, -vx, -vy)
@@ -816,26 +1403,90 @@ class GameEngine {
     // --- WEAPONRY FIRE SCHEDULING ---
 
     fun performPlayerShoot(dx: Float, dy: Float) {
-        if (player.hp <= 0f || player.shootCooldown > 0f || player.isDashing || state != GameState.PLAYING) return
+        if (player.hp <= 0f || player.shootCooldown > 0f || player.isDashing || (state != GameState.PLAYING && state != GameState.IN_CINEMATIC)) return
 
         var fireAngle = atan2(dy, dx)
         player.angle = fireAngle // Aim joystick forces facing angle
 
-        // Recoil effect representation
-        player.shootCooldown = 0.16f
         player.state = PlayerAnimState.SHOOT
         player.stateTimer = 0f
 
-        // Fire single cyber bullet
-        // Double gun offsets (right / left alternating)
         val offsetAngle = fireAngle + (PI.toFloat() / 2f) * (if (Random.nextBoolean()) 1f else -1f)
         val gunX = player.x + cos(fireAngle) * 35f + cos(offsetAngle) * 12f
         val gunY = player.y + sin(fireAngle) * 35f + sin(offsetAngle) * 12f
 
-        addBullet(gunX, gunY, fireAngle, true, 22f, Color.Cyan)
-        addMuzzleFlash(gunX, gunY, fireAngle)
+        var baseDmg = 22f
+        var fireCooldown = 0.16f
+        var projCount = 1
+        var spread = 0.0f
+        var autoColor = Color.Cyan
+        
+        when (activeWeapon) {
+            WeaponType.SHOTGUN -> {
+                baseDmg = 18f
+                fireCooldown = 0.6f
+                projCount = 6
+                spread = 0.5f
+                autoColor = Color(0xFFFF5555)
+            }
+            WeaponType.SMG -> {
+                baseDmg = 12f
+                fireCooldown = 0.08f
+                projCount = 1
+                autoColor = Color(0xFFFFFF55)
+                spread = 0.1f // Innacuracy
+            }
+            WeaponType.ASSAULT_RIFLE -> {
+                baseDmg = 25f
+                fireCooldown = 0.14f
+                projCount = 1
+                autoColor = Color(0xFF55FF55)
+            }
+            WeaponType.LASER_RIFLE -> {
+                baseDmg = 35f
+                fireCooldown = 0.25f
+                projCount = 1
+                autoColor = Color(0xFFFF0055)
+            }
+            WeaponType.PLASMA_CANNON -> {
+                baseDmg = 65f
+                fireCooldown = 0.45f
+                projCount = 1
+                autoColor = Color(0xFFBB00FF)
+            }
+            WeaponType.ROCKET_LAUNCHER -> {
+                baseDmg = 120f
+                fireCooldown = 0.8f
+                projCount = 1
+                autoColor = Color(0xFFFF8800)
+            }
+            WeaponType.RAILGUN -> {
+                baseDmg = 250f
+                fireCooldown = 1.2f
+                projCount = 1
+                autoColor = Color(0xFFFFFFFF)
+            }
+            else -> {}
+        }
+        
+        player.shootCooldown = (if (buffOverdriveTimer > 0f) 0.05f else fireCooldown) / player.fireRateMod
+        
+        val totalProjCount = projCount + upgExtraProjectiles
 
-        // Haptic tap on fire
+        if (totalProjCount == 1) {
+            val finalAngle = if (spread > 0f) fireAngle + (Random.nextFloat() * spread - spread/2f) else fireAngle
+            addBullet(gunX, gunY, finalAngle, true, baseDmg, autoColor)
+        } else {
+            val totalSpread = if (spread > 0f) spread else 0.1f * totalProjCount
+            var currentAngle = fireAngle - totalSpread / 2f
+            val step = totalSpread / (totalProjCount - 1).coerceAtLeast(1)
+            for (i in 0 until totalProjCount) {
+                addBullet(gunX, gunY, currentAngle, true, baseDmg, autoColor)
+                currentAngle += step
+            }
+        }
+        
+        addMuzzleFlash(gunX, gunY, fireAngle)
         triggerHaptic?.invoke()
     }
 
@@ -845,8 +1496,9 @@ class GameEngine {
         // Recycling oldest bullet cleanly when full
         b.x = x
         b.y = y
-        b.vx = cos(angle) * BULLET_SPEED
-        b.vy = sin(angle) * BULLET_SPEED
+        val speed = BULLET_SPEED * (if (isPlayer) upgBulletSpeedMod else 1f)
+        b.vx = cos(angle) * speed
+        b.vy = sin(angle) * speed
         b.angle = angle
         b.isPlayerOwned = isPlayer
         b.damage = damage
@@ -911,8 +1563,17 @@ class GameEngine {
         }
     }
 
-    private fun triggerBossSpecialAttack(enemy: Enemy, targetX: Float, targetY: Float) {
-        enemy.bossAttackPattern = (enemy.bossAttackPattern + 1) % 4
+    private fun triggerBossSpecialAttack(enemy: Enemy, targetX: Float, targetY: Float, isPhase1: Boolean, isPhase2: Boolean, isRage: Boolean) {
+        // Determine pattern based on current phase bounds
+        val nextPattern = if (isPhase1) {
+            0 // Only Nova
+        } else if (isPhase2) {
+            if (Random.nextBoolean()) 1 else 2 // Charge or Spiral
+        } else {
+            Random.nextInt(1, 4) // Charge, Spiral, or Summon
+        }
+        
+        enemy.bossAttackPattern = nextPattern
         
         when (enemy.bossAttackPattern) {
             0 -> {
@@ -956,7 +1617,7 @@ class GameEngine {
                     val ex = enemy.x + cos(enemy.angle + spAngle) * 160f
                     val ey = enemy.y + sin(enemy.angle + spAngle) * 160f
                     
-                    val common = Enemy(enemyIdCounter.incrementAndGet(), EnemyType.SOLDIER)
+                    val common = getPooledEnemy(EnemyType.SOLDIER)
                     common.x = ex.coerceIn(MIN_X + 40f, MAX_X - 40f)
                     common.y = ey.coerceIn(MIN_Y + 40f, MAX_Y - 40f)
                     common.angle = enemy.angle
@@ -1035,24 +1696,49 @@ class GameEngine {
 
                 if (hitEnemy != null) {
                     b.isActive = false
-                    val isCrit = Random.nextFloat() < 0.15f
-                    val baseDamage = b.damage + (Random.nextFloat() * 4f - 2f)
+                    val isCrit = Random.nextFloat() < player.critChance
+                    val baseDamage = (b.damage * player.damageMod) + (Random.nextFloat() * 4f - 2f)
                     val finalDmg = if (isCrit) baseDamage * 1.8f else baseDamage
                     
-                    if (hitEnemy.takeDamage(finalDmg)) {
+                    if (upgExplosive) {
+                        for (other in enemies) {
+                            if (other != hitEnemy && other.hp > 0f && dist(b.x, b.y, other.x, other.y) < 120f) {
+                                other.takeDamage(finalDmg * 0.4f)
+                            }
+                        }
+                        createExplosionParticles(b.x, b.y, Color.Yellow, 12)
+                    }
+
+                    if (upgChainLightning) {
+                        var closest: Enemy? = null
+                        var closestDist = Float.MAX_VALUE
+                        for (other in enemies) {
+                            if (other != hitEnemy && other.hp > 0f) {
+                                val d = dist(hitEnemy.x, hitEnemy.y, other.x, other.y)
+                                if (d < 250f && d < closestDist) {
+                                    closest = other
+                                    closestDist = d
+                                }
+                            }
+                        }
+                        if (closest != null) {
+                            closest.takeDamage(finalDmg * 0.6f)
+                            addParticle(b.x, b.y, (closest.x - b.x)*2f, (closest.y - b.y)*2f, Color.Cyan, 8f, 0.2f)
+                        }
+                    }
+                    
+                    val actualDamage = if (upgIncendiary) finalDmg * 1.25f else finalDmg
+
+                    if (hitEnemy.takeDamage(actualDamage)) {
                         createExplosionParticles(b.x, b.y, Color.Cyan, 8)
                         val textCol = if (isCrit) Color(0xFFFFDE11) else Color.Cyan
-                        spawnText(b.x, b.y - 20f, "${finalDmg.toInt()}", textCol, isCrit)
-                        score += (finalDmg * 1.5).toInt()
+                        spawnText(b.x, b.y - 20f, "${actualDamage.toInt()}", textCol, isCrit)
+                        score += (actualDamage * 1.5).toInt()
 
                         if (hitEnemy.hp <= 0f) {
-                            enemiesKilled++
-                            score += if (hitEnemy.type == EnemyType.SOLDIER) 100 else if (hitEnemy.type == EnemyType.ELITE) 300 else 5000
-                            createExplosionParticles(hitEnemy.x, hitEnemy.y, Color.Magenta, 22)
-                            
-                            if (hitEnemy.type == EnemyType.BOSS) {
-                                state = GameState.GAME_WON
-                            }
+                            hitStopTimer = 0.12f // Large hit stop on kill
+                        } else {
+                            hitStopTimer = 0.04f // Small hit stop on hit
                         }
                     }
                 }
@@ -1062,11 +1748,12 @@ class GameEngine {
                     b.isActive = false
                     if (!player.isDashing) {
                         val baseDamage = b.damage + (Random.nextFloat() * 2f - 1f)
-                        if (player.takeDamage(baseDamage)) {
+                        if (hurtPlayer(baseDamage)) {
                             createExplosionParticles(b.x, b.y, Color.Red, 12)
                             spawnText(b.x, b.y - 20f, "-${baseDamage.toInt()}", Color.Red, false)
                             triggerHaptic?.invoke()
                             screenShakeAmount = 9f
+                            hitStopTimer = 0.08f // Player took damage
                         }
                     }
                 }
@@ -1076,25 +1763,87 @@ class GameEngine {
 
     // --- GAME WAVE SYSTEM CODES ---
 
-    private fun checkWaveProgression(dt: Float) {
-        // Find if all active core enemies are dead (ignoring summons if requested, or checking all active sizes)
-        // Wait, Boss cinematic state counts as no standard list or sum checks
+    private fun checkStageProgression(dt: Float) {
         if (state == GameState.IN_CINEMATIC) return
 
         val livingMajorEnemies = enemies.count { it.hp > 0f }
-        if (livingMajorEnemies == 0) {
-            waveProgressDelay += dt
-            if (waveProgressDelay > 3.0f) {
-                waveProgressDelay = 0f
-                waveNumber++
-                if (waveNumber <= 4) {
-                    spawnWave(waveNumber)
-                } else {
-                    // Won Game beyond Wave 4 (Safety)
-                    state = GameState.GAME_WON
+        
+        if (currentPhase == 0) {
+            spawnUpToCap()
+            if (stageEnemiesKilled >= stageTotalEnemies && livingMajorEnemies == 0) {
+                currentPhase = 1
+                bossWarningTimer = 3f
+                android.util.Log.d("RogueMind", "BOSS_WARNING_START")
+            }
+        } else if (currentPhase == 1) {
+            bossWarningTimer -= dt
+            if (bossWarningTimer <= 0f) {
+                android.util.Log.d("RogueMind", "BOSS_WARNING_END")
+                currentPhase = 2
+                triggerBossIntroCinematic(currentStage)
+            }
+        } else if (currentPhase == 2) {
+            if (!supportSoldiersSpawned && supportSoldiersTimer > 0f) {
+                supportSoldiersTimer -= dt
+                if (supportSoldiersTimer <= 0f) {
+                    spawnSupportSoldiers()
+                }
+            }
+
+            if (livingMajorEnemies == 0 && supportSoldiersSpawned) {
+                waveProgressDelay += dt
+                if (waveProgressDelay > 3.0f) {
+                    waveProgressDelay = 0f
+                    
+                    // Stage Clear
+                    credits += 100 + (currentStage * 25)
+                    if (currentStage >= highestStage) {
+                        highestStage = currentStage + 1
+                    }
+                    unlockedShotgun = highestStage >= 2
+                    unlockedSmg = highestStage >= 5
+                    unlockedAssaultRifle = highestStage >= 10
+                    unlockedLaserRifle = highestStage >= 15
+                    unlockedPlasmaCannon = highestStage >= 25
+                    unlockedRailgun = highestStage >= 40
+                    savePersistence()
+                    
+                    if (currentStage >= 50) {
+                        totalPlayTime += gameTime
+                        state = GameState.GAME_WON
+                    } else {
+                        state = GameState.STAGE_CLEAR
+                    }
                 }
             }
         }
+    }
+
+    fun applyLevelUpUpgrade(upgrade: UpgradeType) {
+        when(upgrade) {
+            UpgradeType.RAPID_FIRE -> upgFireRateMod += 0.15f
+            UpgradeType.DAMAGE_CORE -> upgDamageMod += 0.20f
+            UpgradeType.ACCELERATOR -> upgBulletSpeedMod += 0.15f
+            UpgradeType.PROJECTILE_EX -> upgExtraProjectiles += 1
+            UpgradeType.PRECISION -> upgCritChance += 0.10f
+            UpgradeType.CRIT_CORE -> upgCritDamage += 0.50f
+            UpgradeType.REINFORCED_ARMOR -> {
+                upgMaxHp += 25f
+                player.maxHp += 25f
+                player.hp += 25f
+            }
+            UpgradeType.CYBER_LEGS -> upgSpeedMod += 0.10f
+            UpgradeType.DASH_CAP -> upgDashCooldown += 0.45f
+            UpgradeType.XP_SCANNER -> upgXpRadiusMod += 0.20f
+            UpgradeType.NANO_REPAIR -> upgNanoRepair = true
+            UpgradeType.SHOCKWAVE -> upgShockwave = true
+            UpgradeType.INCENDIARY -> upgIncendiary = true
+            UpgradeType.CHAIN_LIGHTNING -> upgChainLightning = true
+            UpgradeType.EXPLOSIVE -> upgExplosive = true
+            UpgradeType.AUTO_SHIELD -> upgAutoShield = true
+        }
+        
+        state = GameState.PLAYING
     }
 
     // --- PROCEDURAL VISUAL SPARK EMITTERS ---

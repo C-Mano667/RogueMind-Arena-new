@@ -10,10 +10,13 @@ import android.util.Log
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -42,6 +45,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.ColorFilter
@@ -57,13 +62,91 @@ fun GameView(modifier: Modifier = Modifier) {
     val vibrator = remember { context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator }
 
     // Instantiate game engine
-    val gameEngine = remember { GameEngine() }
+    val gameEngine = remember { GameEngine(context) }
 
     // Load Sprites
-    val playerSprite = ImageBitmap.imageResource(id = R.drawable.image_2)
-    val soldierSprite = ImageBitmap.imageResource(id = R.drawable.soldier3)
-    val bossSprite = ImageBitmap.imageResource(id = R.drawable.boss3)
-    val arenaSprite = ImageBitmap.imageResource(id = R.drawable.arena3)
+    var loadError by remember { mutableStateOf<String?>(null) }
+
+    val (rawPlayer, rawSoldier, rawBoss, arenaSprite) = remember(context) {
+        fun loadSafe(resId: Int): ImageBitmap {
+            return try {
+                val options = android.graphics.BitmapFactory.Options()
+                // Prevent scaling memory issues
+                options.inScaled = false 
+                var bmp = android.graphics.BitmapFactory.decodeResource(context.resources, resId, options)
+                if (bmp == null) {
+                    android.util.Log.e("RogueMind", "BitmapFactory returned null for $resId")
+                    ImageBitmap(1, 1)
+                } else {
+                    bmp.asImageBitmap()
+                }
+            } catch (e: Throwable) {
+                android.util.Log.e("RogueMind", "Failed to load resource $resId: ${e.message}", e)
+                ImageBitmap(1, 1)
+            }
+        }
+        listOf(
+            loadSafe(R.drawable.image_2),
+            loadSafe(R.drawable.soldier3),
+            loadSafe(R.drawable.boss3),
+            loadSafe(R.drawable.arena3)
+        )
+    }
+
+    val (playerSprite, soldierSprite, bossSprite) = remember(rawPlayer, rawSoldier, rawBoss) {
+        fun process(image: ImageBitmap): ImageBitmap {
+            try {
+                if (image.width <= 1 && image.height <= 1) return image
+                val bmp = image.asAndroidBitmap().copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+                val w = bmp.width
+                val h = bmp.height
+                
+                // Safety check: skip processing if image is absurdly large to prevent OOM
+                if (w * h > 8000000) {
+                    android.util.Log.w("RogueMind", "Image too large to process safely: ${w}x${h}")
+                    return image
+                }
+                
+                val pixels = IntArray(w * h)
+                bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+                var minX = w; var minY = h; var maxX = 0; var maxY = 0
+                for (i in pixels.indices) {
+                    val c = pixels[i]
+                    val r = android.graphics.Color.red(c)
+                    val g = android.graphics.Color.green(c)
+                    val b = android.graphics.Color.blue(c)
+                    val a = android.graphics.Color.alpha(c)
+                    if (r > 190 && g > 190 && b > 190 && kotlin.math.abs(r - g) < 20 && kotlin.math.abs(g - b) < 20) {
+                        pixels[i] = android.graphics.Color.TRANSPARENT
+                    } else if (a > 10) {
+                        val x = i % w
+                        val y = i / w
+                        if (x < minX) minX = x
+                        if (y < minY) minY = y
+                        if (x > maxX) maxX = x
+                        if (y > maxY) maxY = y
+                    }
+                }
+                if (minX > maxX || minY > maxY) {
+                    minX = 0; minY = 0; maxX = w - 1; maxY = h - 1
+                }
+                bmp.setPixels(pixels, 0, w, 0, 0, w, h)
+                val nW = maxX - minX + 1
+                val nH = maxY - minY + 1
+                return android.graphics.Bitmap.createBitmap(bmp, minX, minY, nW, nH).asImageBitmap()
+            } catch (e: Exception) {
+                android.util.Log.e("RogueMind", "Error processing sprite: ${e.message}", e)
+                return image
+            }
+        }
+        try {
+            listOf(process(rawPlayer), process(rawSoldier), process(rawBoss))
+        } catch (e: Exception) {
+            android.util.Log.e("RogueMind", "Fatal error processing sprites: ${e.message}", e)
+            loadError = "Failed to load sprites. Check logcat."
+            listOf(rawPlayer, rawSoldier, rawBoss)
+        }
+    }
 
 
     // Link engine haptics directly to Android OS Vibrator
@@ -85,13 +168,35 @@ fun GameView(modifier: Modifier = Modifier) {
 
     // --- GAME RENDERING STATE REFRESHERS ---
     var isPlaying by remember { mutableStateOf(false) }
-    var engineState by remember { mutableStateOf(GameState.START_SCREEN) }
-    var waveNum by remember { mutableStateOf(1) }
+    var engineState by remember { mutableStateOf(GameState.MAIN_MENU) }
+    var currentStage by remember { mutableStateOf(1) }
     var score by remember { mutableStateOf(0) }
     var enemiesRemaining by remember { mutableStateOf(0) }
     var playerHp by remember { mutableStateOf(100f) }
     var playerMaxHp by remember { mutableStateOf(100f) }
+    var playerShield by remember { mutableStateOf(0f) }
     var dashCooldownRemaining by remember { mutableStateOf(0f) }
+    var isDashCooldownActive by remember { mutableStateOf(false) }
+    var engineLevel by remember { mutableStateOf(1) }
+    var engineXp by remember { mutableStateOf(0) }
+    var engineRequiredXp by remember { mutableStateOf(100) }
+    var credits by remember { mutableStateOf(0) }
+    var bossHp by remember { mutableStateOf(0f) }
+    var bossMaxHp by remember { mutableStateOf(0f) }
+    
+    var stageTotalEnemies by remember { mutableStateOf(0) }
+    var stageEnemiesKilled by remember { mutableStateOf(0) }
+    var currentPhase by remember { mutableStateOf(0) }
+    var bossWarningTimerInt by remember { mutableStateOf(0) }
+
+    // Buff Timers
+    var buffDamageTimerInt by remember { mutableStateOf(0) }
+    var buffRapidFireTimerInt by remember { mutableStateOf(0) }
+    var buffSpeedTimerInt by remember { mutableStateOf(0) }
+    var buffMagnetTimerInt by remember { mutableStateOf(0) }
+    var buffBerserkTimerInt by remember { mutableStateOf(0) }
+    var buffOverdriveTimerInt by remember { mutableStateOf(0) }
+    var buffFreezeTimerInt by remember { mutableStateOf(0) }
 
     // Camera variables
     var camX by remember { mutableStateOf(1200f) }
@@ -164,12 +269,41 @@ fun GameView(modifier: Modifier = Modifier) {
 
             // 4. Update local reactive bounds details
             engineState = gameEngine.state
-            waveNum = gameEngine.waveNumber
+            currentStage = gameEngine.currentStage
             score = gameEngine.score
             enemiesRemaining = gameEngine.enemies.count { it.hp > 0f }
             playerHp = gameEngine.player.hp
             playerMaxHp = gameEngine.player.maxHp
+            playerShield = gameEngine.playerShield
             dashCooldownRemaining = gameEngine.player.dashCooldown
+            isDashCooldownActive = gameEngine.player.dashCooldown > 0f
+            engineLevel = gameEngine.level
+            engineXp = gameEngine.xp
+            engineRequiredXp = gameEngine.requiredXp
+            credits = gameEngine.credits
+            
+            // Boss HP sync
+            val boss = gameEngine.enemies.find { it.type == EnemyType.BOSS && it.hp > 0f }
+            if (boss != null) {
+                bossHp = boss.hp
+                bossMaxHp = boss.maxHp
+            } else {
+                bossHp = 0f
+            }
+
+            stageTotalEnemies = gameEngine.stageTotalEnemies
+            stageEnemiesKilled = gameEngine.stageEnemiesKilled
+            currentPhase = gameEngine.currentPhase
+            bossWarningTimerInt = gameEngine.bossWarningTimer.toInt()
+
+            // Buff timers sync
+            buffDamageTimerInt = gameEngine.buffDamageTimer.toInt()
+            buffRapidFireTimerInt = gameEngine.buffRapidFireTimer.toInt()
+            buffSpeedTimerInt = gameEngine.buffSpeedTimer.toInt()
+            buffMagnetTimerInt = gameEngine.buffMagnetTimer.toInt()
+            buffBerserkTimerInt = gameEngine.buffBerserkTimer.toInt()
+            buffOverdriveTimerInt = gameEngine.buffOverdriveTimer.toInt()
+            buffFreezeTimerInt = gameEngine.freezeTimer.toInt()
 
             // Stop loop if game states exit playing
             if (engineState == GameState.GAME_OVER || engineState == GameState.GAME_WON) {
@@ -250,7 +384,35 @@ fun GameView(modifier: Modifier = Modifier) {
                         }
                     }
 
-                    // 3. Draw Dash Afterimages
+                    // 3. Draw Shadows for everything
+                    for (obs in gameEngine.obstacles) {
+                        drawOval(color = Color.Black.copy(0.6f), topLeft = Offset(obs.left - 20f, obs.bottom - 40f), size = Size(obs.size + 40f, 60f))
+                    }
+                    val activePl = gameEngine.player
+                    if (activePl.hp > 0f) {
+                        drawCircle(brush = androidx.compose.ui.graphics.Brush.radialGradient(listOf(Color.Cyan.copy(0.6f), Color.Transparent), center = Offset(activePl.x, activePl.y), radius = 70f), radius = 70f, center = Offset(activePl.x, activePl.y))
+                        drawOval(color = Color.Black.copy(0.5f), topLeft = Offset(activePl.x - 25f, activePl.y + 15f), size = Size(50f, 20f))
+                    }
+                    for (enemy in gameEngine.enemies) {
+                        val shW = if (enemy.type == EnemyType.BOSS) 140f else if (enemy.type == EnemyType.ELITE) 50f else 40f
+                        val shH = if (enemy.type == EnemyType.BOSS) 60f else 20f
+                        
+                        val glowColor = if (enemy.type == EnemyType.BOSS) Color(0xFFFF8800) else if (enemy.type == EnemyType.ELITE) Color.Magenta else Color.Red
+                        val glowRad = if (enemy.type == EnemyType.BOSS) 180f else if (enemy.type == EnemyType.ELITE) 80f else 60f
+                        drawCircle(brush = androidx.compose.ui.graphics.Brush.radialGradient(listOf(glowColor.copy(0.5f), Color.Transparent), center = Offset(enemy.x, enemy.y), radius = glowRad), radius = glowRad, center = Offset(enemy.x, enemy.y))
+
+                        drawOval(color = Color.Black.copy(0.4f), topLeft = Offset(enemy.x - shW/2f, enemy.y + (enemy.radius * 0.8f)), size = Size(shW, shH))
+                        
+                        // Boss Telegraph
+                        if (enemy.type == EnemyType.BOSS && enemy.bossAttackTimer > 2.5f) {
+                            val alertLevel = (enemy.bossAttackTimer - 2.5f) / 1.7f
+                            val pulse = abs(sin(alertLevel * 15f))
+                            drawCircle(color = Color.Red.copy(0.2f + 0.3f * pulse), radius = enemy.radius + 150f * alertLevel, center = Offset(enemy.x, enemy.y))
+                            drawCircle(color = Color.Red.copy(0.5f), radius = enemy.radius + 150f * alertLevel, center = Offset(enemy.x, enemy.y), style = Stroke(width = 4f))
+                        }
+                    }
+
+                    // 4. Draw Dash Afterimages
                     for (ai in gameEngine.getActiveAfterimages()) {
                         drawCircle(
                             color = Color.Cyan.copy(alpha = ai.alpha),
@@ -353,6 +515,55 @@ fun GameView(modifier: Modifier = Modifier) {
                         }
                     }
 
+                    // 5a. Draw PowerUps
+                    for (pu in gameEngine.powerUps) {
+                        if (!pu.isActive) continue
+                        val pulse = (sin(gameEngine.gameTime * 4f) * 0.5f + 0.5f)
+                        val puColor = when(pu.type) {
+                            PowerUpType.DAMAGE -> Color.Red
+                            PowerUpType.RAPID_FIRE -> Color.Yellow
+                            PowerUpType.SPEED -> Color.Cyan
+                            PowerUpType.SHIELD -> Color.Blue
+                            PowerUpType.HEALTH -> Color.Green
+                            PowerUpType.MAGNET -> Color(0xFFFF00FF)
+                            PowerUpType.BERSERK -> Color.Red
+                            PowerUpType.GOLDEN -> Color(0xFFFFD700)
+                            PowerUpType.OVERDRIVE -> Color(0xFF00FFFF)
+                            PowerUpType.FREEZE -> Color.Gray
+                            PowerUpType.CREDIT -> Color.Yellow
+                            PowerUpType.WEAPON_CRATE -> Color(0xFF888888)
+                            PowerUpType.NUKE -> Color.Red
+                        }
+                        // Base ring
+                        drawCircle(color = puColor.copy(alpha = 0.3f), radius = 30f + pulse*10f, center = Offset(pu.x, pu.y + 15f))
+                        drawCircle(color = puColor, radius = 30f + pulse*10f, center = Offset(pu.x, pu.y + 15f), style = Stroke(width = 3f))
+                        
+                        val hover = sin(pu.hoverOffset) * 10f
+                        // Core item
+                        drawRoundRect(
+                            color = puColor,
+                            topLeft = Offset(pu.x - 12f, pu.y - 12f + hover),
+                            size = Size(24f, 24f),
+                            cornerRadius = CornerRadius(4f, 4f)
+                        )
+                        drawRoundRect(
+                            color = Color.White.copy(alpha = 0.5f),
+                            topLeft = Offset(pu.x - 8f, pu.y - 8f + hover),
+                            size = Size(16f, 16f),
+                            cornerRadius = CornerRadius(2f, 2f)
+                        )
+                    }
+
+                    // 5b. Draw XP Orbs
+                    for (orb in gameEngine.xpOrbs) {
+                        if (!orb.isActive) continue
+                        val orbColor = if (orb.amount >= 40) Color(0xFFFF00AA) else Color(0xFF00FFCC)
+                        val orbRadius = if (orb.amount >= 500) 14f else if (orb.amount >= 40) 8f else 5f
+                        val pulse = (sin(gameEngine.gameTime * 8f + orb.x) * 4f)
+                        drawCircle(color = orbColor.copy(alpha = 0.5f), radius = orbRadius + pulse, center = Offset(orb.x, orb.y))
+                        drawCircle(color = Color.White, radius = orbRadius * 0.5f, center = Offset(orb.x, orb.y))
+                    }
+
                     // 6. Draw Bullets Tracers
                     // Bullet pool = 150, Bullet speed = 900f
                     for (b in gameEngine.getActiveBullets()) {
@@ -401,6 +612,26 @@ fun GameView(modifier: Modifier = Modifier) {
                 }
 
                 // --- SCREEN SPACE DRAWINGS (NO CAMERA TRANSFORMATIONS) ---
+                
+                // Vignette Screen-Space effect
+                drawRect(
+                    brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f)),
+                        center = Offset(screenCenterX, screenCenterY),
+                        radius = screenW * 0.75f
+                    ),
+                    size = Size(screenW, screenH)
+                )
+
+                // Scanline simple overlay effect (CRT)
+                for (i in 0..(screenH / 6).toInt()) {
+                    drawLine(
+                        color = Color.Black.copy(alpha = 0.10f),
+                        start = Offset(0f, i * 6f),
+                        end = Offset(screenW, i * 6f),
+                        strokeWidth = 1.5f
+                    )
+                }
 
                 // 9. Draw Floating Combat Text labels
                 for (f in gameEngine.getActiveFloatingTexts()) {
@@ -527,6 +758,23 @@ fun GameView(modifier: Modifier = Modifier) {
                     )
                 }
 
+                // XP Orbs
+                for (orb in gameEngine.xpOrbs) {
+                    if (!orb.isActive) continue
+                    val mx = mmCenterX + (orb.x - 1200f) * mmScale
+                    val my = mmCenterY + (orb.y - 1200f) * mmScale
+                    drawCircle(color = Color(0xFFAA00FF), radius = 1.5f, center = Offset(mx, my))
+                }
+                
+                // Powerups
+                val puPulse = (sin(gameEngine.gameTime * 6f) * 1.5f + 2f)
+                for (pu in gameEngine.powerUps) {
+                    if (!pu.isActive) continue
+                    val mx = mmCenterX + (pu.x - 1200f) * mmScale
+                    val my = mmCenterY + (pu.y - 1200f) * mmScale
+                    drawCircle(color = Color.White, radius = puPulse, center = Offset(mx, my))
+                }
+
                 // Enemies indicator on map
                 for (enemy in gameEngine.enemies) {
                     if (enemy.hp <= 0f) continue
@@ -573,21 +821,52 @@ fun GameView(modifier: Modifier = Modifier) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Game Statistics
-                Column {
+                Column(modifier = Modifier.width(200.dp)) {
                     Text(
-                        text = "WAVE $waveNum",
+                        text = "STAGE $currentStage",
                         color = Color.White,
-                        fontSize = 24.sp,
+                        fontSize = 18.sp,
                         fontWeight = androidx.compose.ui.text.font.FontWeight.Black,
-                        style = androidx.compose.ui.text.TextStyle(shadow = androidx.compose.ui.graphics.Shadow(Color.Cyan, Offset(0f, 0f), 10f))
+                        style = androidx.compose.ui.text.TextStyle(shadow = androidx.compose.ui.graphics.Shadow(Color.Red, Offset(0f, 0f), 8f))
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "QUOTA: $stageEnemiesKilled / $stageTotalEnemies  |  ALIVE: $enemiesRemaining",
+                        color = Color.Yellow,
+                        fontSize = 12.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                     )
                     Text(
-                        text = "SCORE: $score",
-                        color = Color(0xFF00FFCC),
-                        fontSize = 14.sp,
+                        text = "CREDITS: $credits  |  LEVEL: $engineLevel",
+                        color = Color.Green,
+                        fontSize = 12.sp,
                         fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                        modifier = Modifier.padding(top = 2.dp)
                     )
+                    
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    // XP Bar
+                    val xpRatio = (engineXp.toFloat() / engineRequiredXp.toFloat()).coerceIn(0f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFF22252C))
+                            .border(1.dp, Color(0x6600FFFF), RoundedCornerShape(4.dp))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(xpRatio)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color(0xFF00FFCC), Color(0xFFAA00FF))
+                                    )
+                                )
+                        )
+                    }
+                    Text(text = "XP $engineXp / $engineRequiredXp", color = Color.LightGray, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
                 }
 
                 // Player Core Vital health segment
@@ -622,14 +901,76 @@ fun GameView(modifier: Modifier = Modifier) {
                                 )
                         )
                     }
+                    
+                    if (playerShield > 0f) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Color(0xFF22252C))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth((playerShield / 100f).coerceIn(0f, 1f))
+                                    .background(Color(0xFF44AAFF))
+                            )
+                        }
+                    }
+
+                    if (bossHp > 0f) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "BOSS: ${bossHp.toInt()} / ${bossMaxHp.toInt()}",
+                            color = Color(0xFFFF4444),
+                            fontSize = 12.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Black
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF22252C))
+                                .border(1.dp, Color(0xFFFF4444), RoundedCornerShape(4.dp))
+                        ) {
+                            val bossRatio = (bossHp / bossMaxHp).coerceIn(0f, 1f)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(bossRatio)
+                                    .background(Brush.horizontalGradient(listOf(Color(0xFFFF8800), Color(0xFFFF0055))))
+                            )
+                        }
+                    }
                 }
                 
-                // Keep blank layout on right side to balance minimap overlap
-                Spacer(modifier = Modifier.width(135.dp))
+                Column(modifier = Modifier.width(135.dp)) {
+                    if (buffDamageTimerInt > 0) Text("DAMAGE UP: ${buffDamageTimerInt}s", color=Color.Red, fontSize=10.sp)
+                    if (buffRapidFireTimerInt > 0) Text("RAPID FIRE: ${buffRapidFireTimerInt}s", color=Color.Yellow, fontSize=10.sp)
+                    if (buffSpeedTimerInt > 0) Text("SPEED UP: ${buffSpeedTimerInt}s", color=Color.Cyan, fontSize=10.sp)
+                    if (buffMagnetTimerInt > 0) Text("MAGNET: ${buffMagnetTimerInt}s", color=Color.Magenta, fontSize=10.sp)
+                    if (buffBerserkTimerInt > 0) Text("BERSERK: ${buffBerserkTimerInt}s", color=Color.Red, fontSize=10.sp)
+                    if (buffOverdriveTimerInt > 0) Text("OVERDRIVE: ${buffOverdriveTimerInt}s", color=Color(0xFF00FFFF), fontSize=10.sp)
+                    if (buffFreezeTimerInt > 0) Text("FREEZE: ${buffFreezeTimerInt}s", color=Color.Gray, fontSize=10.sp)
+                }
             }
 
             // --- BOTTOM TOUCH INTERACTIVE ZONE ---
             if (engineState == GameState.PLAYING) {
+                if (currentPhase == 1 && bossWarningTimerInt > 0) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "BOSS WARNING",
+                            color = Color.Red,
+                            fontSize = 32.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Black,
+                            style = androidx.compose.ui.text.TextStyle(shadow = androidx.compose.ui.graphics.Shadow(Color.Black, Offset(0f, 0f), 10f))
+                        )
+                    }
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -703,9 +1044,8 @@ fun GameView(modifier: Modifier = Modifier) {
                             .padding(bottom = 8.dp)
                     ) {
                         // Curved Cool Down gauge representing 3s countdown arc
-                        val progress = if (dashCooldownRemaining > 0f) dashCooldownRemaining / GameEngine.DASH_COOLDOWN else 0f
-                        
                         Canvas(modifier = Modifier.fillMaxSize()) {
+                            val progress = if (dashCooldownRemaining > 0f) dashCooldownRemaining / GameEngine.DASH_COOLDOWN else 0f
                             drawCircle(
                                 color = Color(0x3300FFCC),
                                 style = Stroke(width = 4f)
@@ -726,9 +1066,9 @@ fun GameView(modifier: Modifier = Modifier) {
                                 .matchParentSize()
                                 .padding(4.dp)
                                 .clip(CircleShape)
-                                .background(if (dashCooldownRemaining > 0f) Color(0xFF15171C) else Color(0xFFFF0055))
+                                .background(if (isDashCooldownActive) Color(0xFF15171C) else Color(0xFFFF0055))
                                 .clickable {
-                                    if (dashCooldownRemaining <= 0f) {
+                                    if (!isDashCooldownActive) {
                                         // Trigger Dash utilizing current movement stick directions
                                         gameEngine.performDash(leftJoystickOffset.x, leftJoystickOffset.y)
                                     }
@@ -738,7 +1078,7 @@ fun GameView(modifier: Modifier = Modifier) {
                         ) {
                             Text(
                                 text = "DASH",
-                                color = if (dashCooldownRemaining > 0f) Color.Gray else Color.White,
+                                color = if (isDashCooldownActive) Color.Gray else Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = androidx.compose.ui.text.font.FontWeight.Black
                             )
@@ -862,8 +1202,92 @@ fun GameView(modifier: Modifier = Modifier) {
             }
         }
 
+        // --- UPGRADE MENU SCREEN OVERLAY ---
+        if (engineState == GameState.UPGRADE_MENU || engineState == GameState.LEVEL_UP_MENU) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xE0050811))
+                    .pointerInput(Unit) {},
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    val title = if (engineState == GameState.LEVEL_UP_MENU) "LEVEL UP!" else "SYSTEM UPGRADE"
+                    val titleColor = if (engineState == GameState.LEVEL_UP_MENU) Color(0xFFFFD700) else Color.Cyan
+                    Text(
+                        text = title,
+                        color = Color.White,
+                        fontSize = 32.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Black,
+                        style = androidx.compose.ui.text.TextStyle(shadow = androidx.compose.ui.graphics.Shadow(titleColor, Offset(0f, 0f), 15f)),
+                        modifier = Modifier.padding(bottom = 24.dp)
+                    )
+                    
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        val upgrades = remember(engineLevel, currentStage) {
+                            val available = UpgradeType.values().toList()
+                            available.shuffled().take(3)
+                        }
+                        
+                        fun info(u: UpgradeType): Pair<String, String> {
+                            return when(u) {
+                                UpgradeType.RAPID_FIRE -> Pair("RAPID FIRE", "Increases fire rate by 15%.")
+                                UpgradeType.DAMAGE_CORE -> Pair("DAMAGE CORE", "Increases base damage by 20%.")
+                                UpgradeType.ACCELERATOR -> Pair("ACCELERATOR", "Increases projectile speed by 15%.")
+                                UpgradeType.PROJECTILE_EX -> Pair("SPREAD SHOT", "Fires 1 extra projectile.")
+                                UpgradeType.PRECISION -> Pair("PRECISION", "Increases critical hit chance by 10%.")
+                                UpgradeType.CRIT_CORE -> Pair("CRIT CORE", "Increases critical damage by 50%.")
+                                UpgradeType.REINFORCED_ARMOR -> Pair("ARMOR", "Max HP increased by 25.")
+                                UpgradeType.CYBER_LEGS -> Pair("CYBER LEGS", "Move 10% faster.")
+                                UpgradeType.DASH_CAP -> Pair("DASH CAP", "Dash cooldown reduced by 0.45s.")
+                                UpgradeType.XP_SCANNER -> Pair("XP SCANNER", "Increases XP pickup radius by 20%.")
+                                UpgradeType.NANO_REPAIR -> Pair("NANO REPAIR", "Slowly regenerates HP over time.")
+                                UpgradeType.SHOCKWAVE -> Pair("SHOCKWAVE", "Dashing pushes and damages enemies.")
+                                UpgradeType.INCENDIARY -> Pair("INCENDIARY", "Bullets deal 25% more final damage.")
+                                UpgradeType.CHAIN_LIGHTNING -> Pair("LIGHTNING", "Bullets chain to nearby targets.")
+                                UpgradeType.EXPLOSIVE -> Pair("EXPLOSIVE", "Bullets detonate on impact for AoE.")
+                                UpgradeType.AUTO_SHIELD -> Pair("AUTO SHIELD", "Gain a shield periodically.")
+                            }
+                        }
+
+                        upgrades.forEach { upgrade ->
+                            val (name, desc) = info(upgrade)
+                            Card(
+                                modifier = Modifier
+                                    .width(180.dp)
+                                    .height(240.dp)
+                                    .clickable { 
+                                        gameEngine.applyLevelUpUpgrade(upgrade)
+                                        gameEngine.state = GameState.PLAYING
+                                    },
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0C101B)),
+                                shape = RoundedCornerShape(12.dp),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                                border = androidx.compose.foundation.BorderStroke(2.dp, Brush.linearGradient(listOf(Color.Cyan, Color.Magenta)))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp).fillMaxSize(),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(text = name, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Black, fontSize = 16.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, style = androidx.compose.ui.text.TextStyle(shadow = androidx.compose.ui.graphics.Shadow(Color.Cyan, Offset.Zero, 8f)))
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text(text = desc, color = Color.LightGray, fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, lineHeight = 16.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // --- NEON CYBERPUNK START OVERLAY SCREEN ---
-        if (engineState == GameState.START_SCREEN) {
+        if (engineState == GameState.MAIN_MENU) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -911,6 +1335,37 @@ fun GameView(modifier: Modifier = Modifier) {
                         modifier = Modifier.padding(top = 12.dp, bottom = 42.dp)
                     )
 
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    ) {
+                        Button(
+                            onClick = { if (gameEngine.currentStage > 1) gameEngine.currentStage-- },
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                        ) {
+                            Text("<", fontSize = 20.sp, color = Color.White)
+                        }
+                        
+                        Spacer(modifier = Modifier.width(24.dp))
+                        
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("STAGE SELECTION", color = Color.Gray, fontSize = 12.sp)
+                            Text("STAGE ${gameEngine.currentStage}", color = Color.Cyan, fontSize = 24.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Black)
+                        }
+
+                        Spacer(modifier = Modifier.width(24.dp))
+                        
+                        Button(
+                            onClick = { if (gameEngine.currentStage < gameEngine.highestStage) gameEngine.currentStage++ },
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                        ) {
+                            Text(">", fontSize = 20.sp, color = Color.White)
+                        }
+                    }
+
                     Button(
                         onClick = {
                             gameEngine.startNewGame()
@@ -927,12 +1382,16 @@ fun GameView(modifier: Modifier = Modifier) {
                         shape = RoundedCornerShape(26.dp)
                     ) {
                         Text(
-                            text = "ENTER ARENA",
+                            text = "PLAY",
                             fontSize = 18.sp,
                             fontWeight = androidx.compose.ui.text.font.FontWeight.Black,
                             letterSpacing = 2.sp
                         )
                     }
+                    
+                    Spacer(modifier = Modifier.height(32.dp))
+                    Text(text = "HIGHEST STAGE: ${gameEngine.highestStage}", color = Color.Gray, fontSize = 14.sp)
+                    Text(text = "CREDITS: ${gameEngine.credits}", color = Color(0xFFFFD700), fontSize = 14.sp)
                 }
             }
         }
@@ -1016,8 +1475,8 @@ fun GameView(modifier: Modifier = Modifier) {
                                 .padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(text = "MAX WAVE CLEARED", color = Color.Gray, fontSize = 14.sp)
-                            Text(text = "WAVE $waveNum", color = Color.White, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Text(text = "MAX STAGE CLEARED", color = Color.Gray, fontSize = 14.sp)
+                            Text(text = "STAGE $currentStage", color = Color.White, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                         }
                         Row(
                             modifier = Modifier
@@ -1054,6 +1513,166 @@ fun GameView(modifier: Modifier = Modifier) {
                                 color = Color.White
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        // --- STAGE CLEAR OVERLAY ---
+        if (engineState == GameState.STAGE_CLEAR) {
+            Box(modifier = Modifier.fillMaxSize().background(Color(0xE0050811)).pointerInput(Unit) {}, contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("STAGE $currentStage CLEARED", color = Color(0xFF00FFCC), fontSize = 32.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Black)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("CREDITS EARNED: ${100 + (currentStage * 25)}", color = Color(0xFFFFD700), fontSize = 18.sp)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Button(onClick = { 
+                        gameEngine.startStage(currentStage + 1)
+                        gameEngine.state = GameState.PLAYING
+                    }) { Text("NEXT STAGE") }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(onClick = { 
+                        gameEngine.currentStage = gameEngine.highestStage
+                        gameEngine.state = GameState.MAIN_MENU 
+                    }, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("MAIN MENU") }
+                }
+            }
+        }
+
+        // --- WEAPON SELECT OVERLAY ---
+        if (engineState == GameState.WEAPON_SELECT) {
+            Box(modifier = Modifier.fillMaxSize().background(Color(0xE0050811)).pointerInput(Unit) {}, contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("CHOOSE A WEAPON", color = Color.Cyan, fontSize = 28.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Black)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        for (wStr in gameEngine.weaponCratesAvailable) {
+                            Button(
+                                onClick = {
+                                    gameEngine.activeWeapon = wStr
+                                    gameEngine.state = GameState.PLAYING 
+                                },
+                                modifier = Modifier.width(180.dp).height(120.dp)
+                            ) { Text(text = wStr.name.replace("_", " "), textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- PERMA UPGRADES OVERLAY ---
+        if (engineState == GameState.PERMA_UPGRADES) {
+            Box(modifier = Modifier.fillMaxSize().background(Color(0xE0050811)).pointerInput(Unit) {}, contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+                    Text("PERMANENT UPGRADES", color = Color(0xFFFFD700), fontSize = 28.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Black)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("CREDITS: ${gameEngine.credits}", color = Color.White, fontSize = 16.sp)
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    fun getCost(lvl: Int) = 100 + (lvl * 150)
+
+                    val upgradeItems = listOf(
+                        Triple("DAMAGE", gameEngine.permaDamageLvl) { if (gameEngine.credits >= getCost(gameEngine.permaDamageLvl)) { gameEngine.credits -= getCost(gameEngine.permaDamageLvl); gameEngine.permaDamageLvl++; gameEngine.savePersistence() } },
+                        Triple("FIRE RATE", gameEngine.permaFireRateLvl) { if (gameEngine.credits >= getCost(gameEngine.permaFireRateLvl)) { gameEngine.credits -= getCost(gameEngine.permaFireRateLvl); gameEngine.permaFireRateLvl++; gameEngine.savePersistence() } },
+                        Triple("MAX HP", gameEngine.permaHpLvl) { if (gameEngine.credits >= getCost(gameEngine.permaHpLvl)) { gameEngine.credits -= getCost(gameEngine.permaHpLvl); gameEngine.permaHpLvl++; gameEngine.savePersistence() } },
+                        Triple("SPEED", gameEngine.permaSpeedLvl) { if (gameEngine.credits >= getCost(gameEngine.permaSpeedLvl)) { gameEngine.credits -= getCost(gameEngine.permaSpeedLvl); gameEngine.permaSpeedLvl++; gameEngine.savePersistence() } },
+                        Triple("DASH", gameEngine.permaDashLvl) { if (gameEngine.credits >= getCost(gameEngine.permaDashLvl)) { gameEngine.credits -= getCost(gameEngine.permaDashLvl); gameEngine.permaDashLvl++; gameEngine.savePersistence() } }
+                    )
+
+                    LazyColumn(modifier = Modifier.height(300.dp)) {
+                        items(upgradeItems.size) { i ->
+                            val item = upgradeItems[i]
+                            val cost = getCost(item.second)
+                            Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Text("${item.first} LVL ${item.second}", color = Color.Cyan)
+                                Button(onClick = { item.third.invoke() }, enabled = gameEngine.credits >= cost) { Text("UPGRADE ($cost)") }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(onClick = { gameEngine.state = GameState.MAIN_MENU }) { Text("BACK TO MENU") }
+                }
+            }
+        }
+
+        // --- INVENTORY OVERLAY ---
+        if (engineState == GameState.INVENTORY) {
+            Box(modifier = Modifier.fillMaxSize().background(Color(0xE0050811)).pointerInput(Unit) {}) {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("ARMORY & INVENTORY", color = Color(0xFF00FFCC), fontSize = 28.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Black)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        item {
+                            Text("EQUIPPED LOADOUT", color = Color.White, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A24)), modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Text("Primary: ${gameEngine.activeWeapon.name}", color = Color.Cyan)
+                                    Text("Secondary: None", color = Color.Gray)
+                                    Text("Armor Core: Standard Edition", color = Color.Gray)
+                                    Text("Passive: None", color = Color.Gray)
+                                }
+                            }
+                        }
+                        
+                        item {
+                            Text("WEAPON COLLECTION (Tap to Equip Primary)", color = Color.White, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            val weapons = listOf(
+                                Pair(WeaponType.DEFAULT, true),
+                                Pair(WeaponType.SHOTGUN, gameEngine.unlockedShotgun),
+                                Pair(WeaponType.SMG, gameEngine.unlockedSmg),
+                                Pair(WeaponType.ASSAULT_RIFLE, gameEngine.unlockedAssaultRifle),
+                                Pair(WeaponType.LASER_RIFLE, gameEngine.unlockedLaserRifle),
+                                Pair(WeaponType.PLASMA_CANNON, gameEngine.unlockedPlasmaCannon),
+                                Pair(WeaponType.ROCKET_LAUNCHER, gameEngine.highestStage >= 20), // Placeholder unlock logic since it wasn't requested explicitly but we have the type. Wait.
+                                Pair(WeaponType.RAILGUN, gameEngine.unlockedRailgun)
+                            )
+                            
+                            weapons.forEach { (weapon, unlocked) ->
+                                val color = if (unlocked) if (gameEngine.activeWeapon == weapon) Color.Yellow else Color.Green else Color.DarkGray
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A24)),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(enabled = unlocked) {
+                                        gameEngine.activeWeapon = weapon
+                                        gameEngine.savePersistence()
+                                    }
+                                ) {
+                                    Row(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text(weapon.name, color = color, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                                        if (!unlocked) Text("LOCKED", color = Color.Red, fontSize = 12.sp)
+                                        else if (gameEngine.activeWeapon == weapon) Text("EQUIPPED", color = Color.Yellow, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                        }
+                        
+                        item {
+                            Text("POWER-UP COLLECTION", color = Color.White, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("All power-ups discovered via play.", color = Color.Gray, fontSize = 14.sp)
+                            Spacer(modifier = Modifier.height(16.dp))
+                        }
+
+                        item {
+                            Text("BOSS COLLECTION", color = Color.White, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Defeated: ${if (gameEngine.highestStage >= 1) "Stage 1 Boss" else "None"}", color = Color.LightGray)
+                            Spacer(modifier = Modifier.height(32.dp))
+                        }
+                    }
+                    
+                    Button(
+                        onClick = { gameEngine.state = GameState.MAIN_MENU },
+                        modifier = Modifier.fillMaxWidth(0.6f).height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                    ) { 
+                        Text("BACK", fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) 
                     }
                 }
             }

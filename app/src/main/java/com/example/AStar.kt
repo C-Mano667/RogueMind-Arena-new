@@ -1,6 +1,5 @@
 package com.example
 
-import java.util.PriorityQueue
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -15,11 +14,9 @@ class AStar {
         const val CELL_SIZE = 50f // 2200 / 44 = 50f
     }
 
-    // Grid representing blocked cells
     val isObstacle = Array(GRID_SIZE) { BooleanArray(GRID_SIZE) { false } }
 
     init {
-        // Initialize the 16 circular obstacles in a ring at radius 900
         val centerX = 1200f
         val centerY = 1200f
         val radius = 900f
@@ -37,7 +34,6 @@ class AStar {
             val topY = obsY - obstacleHalf
             val bottomY = obsY + obstacleHalf
 
-            // Mark cells that intersect with this 120x120 bounding box
             val startCellX = ((leftX - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
             val endCellX = ((rightX - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
             val startCellY = ((topY - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
@@ -51,50 +47,18 @@ class AStar {
         }
     }
 
-    data class Node(
-        val cx: Int,
-        val cy: Int,
-        var g: Float = Float.MAX_VALUE,
-        var h: Float = 0f,
-        var parent: Node? = null
-    ) {
-        val f: Float get() = g + h
+    fun worldToGridX(worldX: Float): Int = ((worldX - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
+    fun worldToGridY(worldY: Float): Int = ((worldY - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
+    fun gridToWorldX(cx: Int): Float = WORLD_START + cx * CELL_SIZE + CELL_SIZE / 2f
+    fun gridToWorldY(cy: Int): Float = WORLD_START + cy * CELL_SIZE + CELL_SIZE / 2f
 
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is Node) return false
-            return cx == other.cx && cy == other.cy
-        }
-
-        override fun hashCode(): Int = cx * 31 + cy
-    }
-
-    fun worldToGridX(worldX: Float): Int {
-        return ((worldX - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
-    }
-
-    fun worldToGridY(worldY: Float): Int {
-        return ((worldY - WORLD_START) / CELL_SIZE).toInt().coerceIn(0, GRID_SIZE - 1)
-    }
-
-    fun gridToWorldX(cx: Int): Float {
-        return WORLD_START + cx * CELL_SIZE + CELL_SIZE / 2f
-    }
-
-    fun gridToWorldY(cy: Int): Float {
-        return WORLD_START + cy * CELL_SIZE + CELL_SIZE / 2f
-    }
-
-    // Is a cell walkable?
     fun isWalkable(cx: Int, cy: Int): Boolean {
         if (cx !in 0 until GRID_SIZE || cy !in 0 until GRID_SIZE) return false
         return !isObstacle[cx][cy]
     }
 
-    // Find nearest walkable cell close to grid coords
     private fun findNearestWalkableCell(targetCx: Int, targetCy: Int): Pair<Int, Int> {
         if (isWalkable(targetCx, targetCy)) return Pair(targetCx, targetCy)
-
         var radius = 1
         while (radius < GRID_SIZE) {
             for (dx in -radius..radius) {
@@ -102,15 +66,55 @@ class AStar {
                     if (abs(dx) != radius && abs(dy) != radius) continue
                     val nx = targetCx + dx
                     val ny = targetCy + dy
-                    if (isWalkable(nx, ny)) {
-                        return Pair(nx, ny)
-                    }
+                    if (isWalkable(nx, ny)) return Pair(nx, ny)
                 }
             }
             radius++
         }
-        return Pair(targetCx, targetCy) // Fallback
+        return Pair(targetCx, targetCy)
     }
+
+    // Zero-allocation A* arrays
+    private val gScore = FloatArray(GRID_SIZE * GRID_SIZE)
+    private val fScore = FloatArray(GRID_SIZE * GRID_SIZE)
+    private val parent = IntArray(GRID_SIZE * GRID_SIZE)
+    private val inOpen = BooleanArray(GRID_SIZE * GRID_SIZE)
+    private val inClosed = BooleanArray(GRID_SIZE * GRID_SIZE)
+    private val openHeap = IntArray(GRID_SIZE * GRID_SIZE)
+    private var heapSize = 0
+
+    private fun pushHeap(nodeIdx: Int) {
+        var i = heapSize
+        openHeap[heapSize++] = nodeIdx
+        while (i > 0) {
+            val p = (i - 1) / 2
+            if (fScore[openHeap[i]] < fScore[openHeap[p]]) {
+                val temp = openHeap[i]; openHeap[i] = openHeap[p]; openHeap[p] = temp
+                i = p
+            } else break
+        }
+    }
+
+    private fun popHeap(): Int {
+        val res = openHeap[0]
+        openHeap[0] = openHeap[--heapSize]
+        var i = 0
+        while (true) {
+            val left = 2 * i + 1
+            if (left >= heapSize) break
+            val right = left + 1
+            val minChild = if (right < heapSize && fScore[openHeap[right]] < fScore[openHeap[left]]) right else left
+            if (fScore[openHeap[minChild]] < fScore[openHeap[i]]) {
+                val temp = openHeap[i]; openHeap[i] = openHeap[minChild]; openHeap[minChild] = temp
+                i = minChild
+            } else break
+        }
+        return res
+    }
+
+    private val directionsX = intArrayOf(0, 1, 0, -1, 1, 1, -1, -1)
+    private val directionsY = intArrayOf(1, 0, -1, 0, -1, 1, 1, -1)
+    private val directionsCost = floatArrayOf(1.0f, 1.0f, 1.0f, 1.0f, 1.414f, 1.414f, 1.414f, 1.414f)
 
     fun findPath(
         startX: Float,
@@ -123,96 +127,92 @@ class AStar {
         var endCx = worldToGridX(endX)
         var endCy = worldToGridY(endY)
 
-        // Make sure positions are walkable or clamp to nearest walkable cell
         if (!isWalkable(startCx, startCy)) {
             val nearest = findNearestWalkableCell(startCx, startCy)
-            startCx = nearest.first
-            startCy = nearest.second
+            startCx = nearest.first; startCy = nearest.second
         }
         if (!isWalkable(endCx, endCy)) {
             val nearest = findNearestWalkableCell(endCx, endCy)
-            endCx = nearest.first
-            endCy = nearest.second
+            endCx = nearest.first; endCy = nearest.second
         }
 
         if (startCx == endCx && startCy == endCy) {
             return listOf(Pair(gridToWorldX(endCx), gridToWorldY(endCy)))
         }
 
-        val openSet = PriorityQueue<Node>(compareBy { it.f })
-        val openMap = HashMap<Pair<Int, Int>, Node>()
-        val closedSet = HashSet<Pair<Int, Int>>()
+        // Fast clean array states
+        gScore.fill(Float.MAX_VALUE)
+        fScore.fill(Float.MAX_VALUE)
+        inOpen.fill(false)
+        inClosed.fill(false)
+        heapSize = 0
 
-        val startNode = Node(startCx, startCy, g = 0f, h = heuristic(startCx, startCy, endCx, endCy))
-        openSet.add(startNode)
-        openMap[Pair(startCx, startCy)] = startNode
+        val startIdx = startCy * GRID_SIZE + startCx
+        val endIdx = endCy * GRID_SIZE + endCx
+        gScore[startIdx] = 0f
+        fScore[startIdx] = heuristic(startCx, startCy, endCx, endCy)
+        parent[startIdx] = -1
+        inOpen[startIdx] = true
+        pushHeap(startIdx)
 
-        val directions = listOf(
-            Pair(0, 1) to 1.0f,
-            Pair(1, 0) to 1.0f,
-            Pair(0, -1) to 1.0f,
-            Pair(-1, 0) to 1.0f,
-            Pair(1, 1) to 1.414f,
-            Pair(1, -1) to 1.414f,
-            Pair(-1, 1) to 1.414f,
-            Pair(-1, -1) to 1.414f
-        )
+        var foundEnd = false
 
-        while (openSet.isNotEmpty()) {
-            val current = openSet.poll() ?: break
-            val currCoords = Pair(current.cx, current.cy)
-            openMap.remove(currCoords)
-            closedSet.add(currCoords)
+        while (heapSize > 0) {
+            val currentIdx = popHeap()
+            inOpen[currentIdx] = false
+            inClosed[currentIdx] = true
 
-            if (current.cx == endCx && current.cy == endCy) {
-                // Reconstruct path
-                val path = mutableListOf<Pair<Float, Float>>()
-                var curr: Node? = current
-                while (curr != null) {
-                    path.add(Pair(gridToWorldX(curr.cx), gridToWorldY(curr.cy)))
-                    curr = curr.parent
-                }
-                path.reverse()
-                return path
+            if (currentIdx == endIdx) {
+                foundEnd = true
+                break
             }
 
-            for ((dir, cost) in directions) {
-                val nx = current.cx + dir.first
-                val ny = current.cy + dir.second
-                val neighborCoords = Pair(nx, ny)
+            val cx = currentIdx % GRID_SIZE
+            val cy = currentIdx / GRID_SIZE
 
-                if (!isWalkable(nx, ny) || closedSet.contains(neighborCoords)) continue
+            for (i in 0 until 8) {
+                val nx = cx + directionsX[i]
+                val ny = cy + directionsY[i]
+                if (nx !in 0 until GRID_SIZE || ny !in 0 until GRID_SIZE) continue
+                if (isObstacle[nx][ny]) continue
 
-                val tentativeG = current.g + cost
-                val existing = openMap[neighborCoords]
+                val neighborIdx = ny * GRID_SIZE + nx
+                if (inClosed[neighborIdx]) continue
 
-                if (existing == null) {
-                    val neighborNode = Node(
-                        cx = nx,
-                        cy = ny,
-                        g = tentativeG,
-                        h = heuristic(nx, ny, endCx, endCy),
-                        parent = current
-                    )
-                    openSet.add(neighborNode)
-                    openMap[neighborCoords] = neighborNode
-                } else if (tentativeG < existing.g) {
-                    openSet.remove(existing)
-                    existing.g = tentativeG
-                    existing.parent = current
-                    openSet.add(existing)
+                val cost = directionsCost[i]
+                val tentativeG = gScore[currentIdx] + cost
+
+                if (!inOpen[neighborIdx] || tentativeG < gScore[neighborIdx]) {
+                    gScore[neighborIdx] = tentativeG
+                    fScore[neighborIdx] = tentativeG + heuristic(nx, ny, endCx, endCy)
+                    parent[neighborIdx] = currentIdx
+                    if (!inOpen[neighborIdx]) {
+                        inOpen[neighborIdx] = true
+                        pushHeap(neighborIdx)
+                    }
                 }
             }
         }
 
-        // Return direct link if path not found
-        return listOf(Pair(gridToWorldX(endCx), gridToWorldY(endCy)))
+        if (!foundEnd) {
+            return listOf(Pair(gridToWorldX(endCx), gridToWorldY(endCy)))
+        }
+
+        val resultPath = mutableListOf<Pair<Float, Float>>()
+        var curr = endIdx
+        while (curr != -1) {
+            val cx = curr % GRID_SIZE
+            val cy = curr / GRID_SIZE
+            resultPath.add(Pair(gridToWorldX(cx), gridToWorldY(cy)))
+            curr = parent[curr]
+        }
+        resultPath.reverse()
+        return resultPath
     }
 
     private fun heuristic(x1: Int, y1: Int, x2: Int, y2: Int): Float {
-        // Euclidean distance heuristic for natural movement paths
-        val dx = (x1 - x2).toFloat()
-        val dy = (y1 - y2).toFloat()
-        return sqrt(dx * dx + dy * dy)
+        val dx = x1 - x2
+        val dy = y1 - y2
+        return sqrt((dx * dx + dy * dy).toFloat())
     }
 }
